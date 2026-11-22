@@ -13,6 +13,9 @@ const hud = @import("render/hud.zig");
 const scene = @import("render/scene.zig");
 const TerrainStream = @import("TerrainStream.zig");
 
+// Starting size. The window is resizable on both platforms: natively you
+// drag or maximize it; on web raylib sizes the canvas to the browser
+// viewport (window.innerWidth/innerHeight) and follows its resizes.
 const width = 800;
 const height = 450;
 // emscripten_set_main_loop args: fps 0 = requestAnimationFrame; nonzero
@@ -38,6 +41,7 @@ var clock: core.FixedClock = .{};
 var stats: core.FrameStats = .{};
 
 pub fn main() !void {
+    rl.setConfigFlags(.{ .window_resizable = true });
     rl.initWindow(width, height, "zig-fatmile");
     defer rl.closeWindow();
     scene.init();
