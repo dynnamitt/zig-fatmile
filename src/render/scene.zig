@@ -5,8 +5,9 @@ const rl = @import("raylib");
 const grid_slices = 40;
 const grid_spacing = 1.0;
 
-/// Eye 1.7 m above the ground, looking ahead and slightly down.
-pub const camera: rl.Camera3D = .{
+/// Eye 1.7 m above the ground, looking ahead and slightly down. Fixed until
+/// the player (and its camera) becomes game state.
+const camera: rl.Camera3D = .{
     .position = .{ .x = 0, .y = 1.7, .z = 6 },
     .target = .{ .x = 0, .y = 0.5, .z = 0 },
     .up = .{ .x = 0, .y = 1, .z = 0 },
@@ -14,9 +15,9 @@ pub const camera: rl.Camera3D = .{
     .projection = .perspective,
 };
 
-/// Draws the world from `cam`.
-pub fn draw(cam: rl.Camera3D) void {
-    rl.beginMode3D(cam);
+/// Draws the world.
+pub fn draw() void {
+    rl.beginMode3D(camera);
     defer rl.endMode3D();
     rl.drawGrid(grid_slices, grid_spacing);
 }

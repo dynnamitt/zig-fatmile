@@ -47,8 +47,7 @@ test "set and setPair store the value" {
     set(world, e, Counter, .{ .n = 3 });
     setPair(world, e, Tally, target, .{ .n = 5 });
     try std.testing.expectEqual(@as(u32, 3), ecs.get(world, e, Counter).?.n);
-    const pair: *const Tally = @ptrCast(@alignCast(ecs.get_id(world, e, ecs.pair(ecs.id(Tally), target)).?));
-    try std.testing.expectEqual(@as(u32, 5), pair.n);
+    try std.testing.expectEqual(@as(u32, 5), ecs.get_pair(world, e, ecs.id(Tally), target, Tally).?.n);
 }
 
 test "addSystem runs once per progress in its phase" {

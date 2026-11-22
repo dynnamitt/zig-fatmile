@@ -56,17 +56,14 @@ fn frame() callconv(.c) void {
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(core.palette.background));
-    scene.draw(scene.camera);
+    scene.draw();
 
-    // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
+    // CPU work = ECS steps + issuing draw calls, up to here. Flush raylib's
     // last draw batch first so it counts. GPU time isn't measured (GL runs
     // asynchronously, so it shows up at present); the present (buffer swap,
     // vsync and setTargetFPS waits) is idle time and stays out. On web
     // performance.now() is coarsened (~0.1 ms), so read the mean, not one frame.
-    rlDrawRenderBatchActive();
+    rl.gl.rlDrawRenderBatchActive();
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
     hud.drawStats(stats);
 }
-
-// rlgl, part of the raylib library; raylib-zig doesn't export it as a module.
-extern fn rlDrawRenderBatchActive() void;

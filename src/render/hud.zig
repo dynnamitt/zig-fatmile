@@ -4,7 +4,7 @@ const rl = @import("raylib");
 const core = @import("core");
 
 // Right-aligned, raylib's default font size. The buffer fits any i32 FPS and
-// any sane ms pair.
+// any sane ms pair; a line that doesn't fit shows "?".
 const margin = 16;
 const font_size = 20;
 const line_gap = 4;
@@ -14,7 +14,7 @@ const buf_len = 64;
 /// Not rl.drawFPS: its lime/orange/red colours ignore the theme.
 pub fn drawStats(stats: core.FrameStats) void {
     var buf: [buf_len]u8 = undefined;
-    drawLine(std.fmt.bufPrintSentinel(&buf, "{d} FPS", .{rl.getFPS()}, 0) catch unreachable, 0);
+    drawLine(std.fmt.bufPrintSentinel(&buf, "{d} FPS", .{rl.getFPS()}, 0) catch "FPS ?", 0);
     drawLine(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
 }
 

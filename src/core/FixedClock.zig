@@ -1,5 +1,5 @@
 //! Turns variable frame times into a count of fixed `step_dt` steps, so the
-//! simulation behaves the same at any frame rate (and matches the tests).
+//! simulation behaves the same at any frame rate.
 const FixedClock = @This();
 
 /// Fixed simulation step, in seconds.
