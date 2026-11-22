@@ -21,11 +21,11 @@ test {
 
 test "register leaves a world that steps" {
     const Flat = struct {
-        fn heightAt(_: *const anyopaque, _: f32, _: f32) ?f32 {
+        pub fn heightAt(_: *const @This(), _: f32, _: f32) ?f32 {
             return 0;
         }
     };
-    const ground: core.ground.Ground = .{ .ctx = undefined, .heightAtFn = Flat.heightAt };
+    const ground: core.ground.Ground = .of(Flat, &.{});
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world, &ground);

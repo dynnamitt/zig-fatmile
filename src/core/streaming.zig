@@ -12,11 +12,6 @@ const Hex = @import("Hex.zig");
 pub const Range = struct {
     load: u32,
     keep: u32,
-
-    /// Slots a load buffer needs to hold every wanted chunk.
-    pub fn maxWanted(r: Range) usize {
-        return Hex.rangeCount(r.load);
-    }
 };
 
 pub const Plan = struct {
@@ -28,7 +23,7 @@ pub const Plan = struct {
 
 /// Plans one frame. `world.has(coord)` says whether the world has a chunk
 /// there; `loaded` lists the chunks loaded now. `load_buf` needs
-/// `range.maxWanted()` slots and `unload_buf` `loaded.len`.
+/// `Hex.rangeCount(range.load)` slots and `unload_buf` `loaded.len`.
 pub fn plan(range: Range, center: Hex, world: anytype, loaded: []const Hex, budget: usize, load_buf: []Hex, unload_buf: []Hex) Plan {
     std.debug.assert(range.keep >= range.load);
     var n_unload: usize = 0;

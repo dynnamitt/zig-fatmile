@@ -19,6 +19,17 @@ pub const Ground = struct {
     pub fn heightAt(g: Ground, x: f32, z: f32) ?f32 {
         return g.heightAtFn(g.ctx, x, z);
     }
+
+    /// `ptr` as a Ground: `T` has `fn heightAt(*const T, f32, f32) ?f32`.
+    /// `ptr` must outlive the Ground.
+    pub fn of(comptime T: type, ptr: *const T) Ground {
+        return .{ .ctx = ptr, .heightAtFn = struct {
+            fn f(ctx: *const anyopaque, x: f32, z: f32) ?f32 {
+                const self: *const T = @ptrCast(@alignCast(ctx));
+                return self.heightAt(x, z);
+            }
+        }.f };
+    }
 };
 
 /// Points this close outside a triangle (barycentric weight) still count as
@@ -71,14 +82,13 @@ const testing = std.testing;
 const Ramp = struct {
     ramp: f32,
 
-    fn heightAt(ctx: *const anyopaque, x: f32, z: f32) ?f32 {
-        const self: *const Ramp = @ptrCast(@alignCast(ctx));
+    pub fn heightAt(self: *const Ramp, x: f32, z: f32) ?f32 {
         if (@abs(z) > 10) return null;
         return self.ramp * std.math.clamp(x, 0, 1);
     }
 
     fn ground(self: *const Ramp) Ground {
-        return .{ .ctx = self, .heightAtFn = heightAt };
+        return .of(Ramp, self);
     }
 };
 

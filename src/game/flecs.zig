@@ -22,7 +22,7 @@ pub const SystemOptions = struct {
     terms: []const ecs.term_t = &.{},
     /// Shared data for the system, read back as `it.ctx`. Workers read it
     /// concurrently, so it must not change while `ecs.progress` runs.
-    ctx: ?*anyopaque = null,
+    ctx: ?*const anyopaque = null,
 };
 
 /// zflecs' `ADD_SYSTEM_WITH_FILTERS`, plus `multi_threaded` (which it can't
@@ -33,7 +33,7 @@ pub fn addSystem(world: *ecs.world_t, name: [*:0]const u8, phase: ecs.entity_t, 
     var desc = ecs.SYSTEM_DESC_WITH_FILTERS(f, opts.terms);
     desc.phase = phase;
     desc.multi_threaded = true;
-    desc.ctx = opts.ctx;
+    desc.ctx = @constCast(opts.ctx); // flecs' C field isn't const; systems only read it
     _ = ecs.SYSTEM(world, name, &desc);
 }
 
@@ -79,7 +79,7 @@ test "addSystem passes ctx through to the system" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     ecs.COMPONENT(world, Counter);
-    var by: u32 = 7;
+    const by: u32 = 7;
     addSystem(world, "bump_by", ecs.OnUpdate, bumpBy, .{ .ctx = &by });
     const e = ecs.new_id(world);
     set(world, e, Counter, .{ .n = 0 });

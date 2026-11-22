@@ -26,7 +26,7 @@ pub fn lerp(a: u32, b: u32, t: f32) u32 {
     inline for (.{ 24, 16, 8, 0 }) |shift| {
         const ca: f32 = @floatFromInt((a >> shift) & 0xFF);
         const cb: f32 = @floatFromInt((b >> shift) & 0xFF);
-        const c: u32 = @intFromFloat(@round(ca + (cb - ca) * t));
+        const c: u32 = @intFromFloat(@round(std.math.lerp(ca, cb, t)));
         out |= c << shift;
     }
     return out;

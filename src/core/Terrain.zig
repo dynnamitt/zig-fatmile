@@ -43,17 +43,13 @@ pub fn remove(t: *Terrain, coord: Hex) void {
     kv.value.cells.deinit(t.allocator);
 }
 
-pub fn contains(t: Terrain, coord: Hex) bool {
-    return t.chunks.contains(coord);
-}
-
 /// The chunk coordinate that world point `x`, `z` falls in.
 pub fn chunkAt(t: Terrain, x: f32, z: f32) Hex {
     return Hex.fromWorld(x, z, t.hex_size).toLowerRes(t.chunk_radius);
 }
 
 /// Ground height at world `x`, `z`, or null off the loaded terrain.
-pub fn heightAt(t: Terrain, x: f32, z: f32) ?f32 {
+pub fn heightAt(t: *const Terrain, x: f32, z: f32) ?f32 {
     // The point lies in its hex's full hexagon. That area is covered by the
     // hex's face, half of each gap quad round it and the junction tris at
     // its corners, which the hex or one of its neighbours owns.
@@ -71,12 +67,7 @@ pub fn heightAt(t: Terrain, x: f32, z: f32) ?f32 {
 
 /// This terrain as the ground rule's height lookup. `t` must stay put.
 pub fn asGround(t: *const Terrain) ground.Ground {
-    return .{ .ctx = t, .heightAtFn = heightAtErased };
-}
-
-fn heightAtErased(ctx: *const anyopaque, x: f32, z: f32) ?f32 {
-    const t: *const Terrain = @ptrCast(@alignCast(ctx));
-    return t.heightAt(x, z);
+    return .of(Terrain, t);
 }
 
 const testing = std.testing;
@@ -152,7 +143,7 @@ test "nothing outside the loaded chunks; remove unloads" {
     try testing.expectEqual(null, t.heightAt(1e4, 0));
     try testing.expect(t.asGround().heightAt(0, 0) != null);
     t.remove(.zero);
-    try testing.expect(!t.contains(.zero));
+    try testing.expect(!t.chunks.contains(.zero));
     try testing.expectEqual(null, t.heightAt(0, 0));
     t.remove(.zero); // removing twice is fine
 }

@@ -40,7 +40,7 @@ var stats: core.FrameStats = .{};
 pub fn main() !void {
     rl.initWindow(width, height, "zig-fatmile");
     defer rl.closeWindow();
-    rl.gl.rlSetClipPlanes(scene.near, scene.far);
+    scene.init();
 
     stream = try .init(std.heap.c_allocator);
     defer stream.deinit();
@@ -81,7 +81,7 @@ fn frame() callconv(.c) void {
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(core.palette.background));
-    scene.draw(scene.camera(world, player, clock.alpha()), stream.meshes(), stream.material);
+    scene.draw(scene.camera(game.player.view(world, player, clock.alpha())), stream.meshes(), stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't

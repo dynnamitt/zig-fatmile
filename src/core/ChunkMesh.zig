@@ -38,18 +38,19 @@ pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{Out
     errdefer allocator.free(positions);
     const normals = try allocator.alloc(f32, n_tris * 9);
     errdefer allocator.free(normals);
-    const out: ChunkMesh = .{ .positions = positions, .normals = normals, .colors = try allocator.alloc(u8, n_tris * 12) };
+    const colors = try allocator.alloc(u8, n_tris * 12);
+    const out: ChunkMesh = .{ .positions = positions, .normals = normals, .colors = colors };
 
     const sun = style.sun.normalize();
     var w: Writer = .{ .mesh = out };
     for (chunk.tris) |t| {
-        const n = faceNormal(t);
+        const up = upFacing(t);
         const avg = (t.a.y + t.b.y + t.c.y) / 3;
-        const light = style.ambient + (1 - style.ambient) * @max(0, n.dot(sun));
-        w.tri(t, palette.shade(palette.ground(avg / style.max_height), light));
+        const light = style.ambient + (1 - style.ambient) * @max(0, up.normal.dot(sun));
+        w.tri(up, palette.shade(palette.ground(avg / style.max_height), light));
     }
     for (chunk.lines) |l| {
-        for (ribbon(l, style.line_width, style.line_lift)) |t| w.tri(t, palette.line);
+        for (ribbon(l, style.line_width, style.line_lift)) |t| w.tri(upFacing(t), palette.line);
     }
     std.debug.assert(w.n == n_tris);
     return out;
@@ -61,11 +62,15 @@ pub fn deinit(m: ChunkMesh, allocator: std.mem.Allocator) void {
     allocator.free(m.colors);
 }
 
-/// Unit normal of `t`, flipped to face up: hex corners don't all wind the
-/// same way, and the GPU culls triangles facing away.
-pub fn faceNormal(t: Chunk.Tri) Vec3 {
-    const n = t.b.sub(t.a).cross(t.c.sub(t.a)).normalize();
-    return if (n.y < 0) n.scale(-1) else n;
+/// A triangle wound counter-clockwise seen from above (GL's front face), and
+/// its unit normal, which then points up. The generator's tris don't all
+/// wind the same way, and the GPU culls triangles facing away.
+pub const UpTri = struct { tri: Chunk.Tri, normal: Vec3 };
+
+pub fn upFacing(t: Chunk.Tri) UpTri {
+    const n = t.b.sub(t.a).cross(t.c.sub(t.a));
+    if (n.y >= 0) return .{ .tri = t, .normal = n.normalize() };
+    return .{ .tri = .{ .a = t.a, .b = t.c, .c = t.b }, .normal = n.scale(-1).normalize() };
 }
 
 /// Line `l` as two triangles `width` wide, lying flat, `lift` above it.
@@ -84,12 +89,9 @@ const Writer = struct {
     mesh: ChunkMesh,
     n: usize = 0,
 
-    /// Appends `t` wound counter-clockwise seen from above (GL's front face).
-    fn tri(w: *Writer, t: Chunk.Tri, color: u32) void {
-        const raw = t.b.sub(t.a).cross(t.c.sub(t.a));
-        const verts = if (raw.y >= 0) [3]Vec3{ t.a, t.b, t.c } else [3]Vec3{ t.a, t.c, t.b };
-        const n = faceNormal(t);
-        for (verts, 0..) |v, k| {
+    fn tri(w: *Writer, up: UpTri, color: u32) void {
+        const n = up.normal;
+        for ([_]Vec3{ up.tri.a, up.tri.b, up.tri.c }, 0..) |v, k| {
             const i = w.n * 3 + k;
             w.mesh.positions[i * 3 ..][0..3].* = .{ v.x, v.y, v.z };
             w.mesh.normals[i * 3 ..][0..3].* = .{ n.x, n.y, n.z };
@@ -145,7 +147,7 @@ test "ribbon: width across the line, lifted, both tris up-facing" {
         try testing.expectApproxEqAbs(1.05, v.y, 1e-6);
         try testing.expectApproxEqAbs(0.05, @abs(v.z), 1e-6);
     };
-    try testing.expect(faceNormal(tris[0]).y > 0.99);
+    try testing.expect(upFacing(tris[0]).normal.y > 0.99);
     // A degenerate (zero-length) line gives a zero-area ribbon, not NaNs.
     const dot = ribbon(.{ .a = l.a, .b = l.a }, 0.1, 0.05);
     try testing.expect(!std.math.isNan(dot[0].a.x));

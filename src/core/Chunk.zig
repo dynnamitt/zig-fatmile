@@ -77,11 +77,11 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     const tris_len = @as(u64, n_tris) * @sizeOf(Tri);
     const lines_len = @as(u64, n_lines) * @sizeOf(Line);
     if (payload.len != cells_len + tris_len + lines_len) return error.PayloadLength;
-    if (fnv1a64(payload) != hash) return error.HashMismatch;
+    if (std.hash.Fnv1a_64.hash(payload) != hash) return error.HashMismatch;
 
     // Checked above to fit in the payload, so these fit in usize (wasm32 too).
     const tris_at: usize = @intCast(header_len + cells_len);
-    const lines_at: usize = @intCast(header_len + cells_len + tris_len);
+    const lines_at: usize = tris_at + @as(usize, @intCast(tris_len));
     const chunk: Chunk = .{
         .coord = .{ .q = readInt(i32, bytes, 8), .r = readInt(i32, bytes, 12) },
         .hash = hash,
@@ -108,19 +108,12 @@ fn readInt(comptime T: type, bytes: []const u8, at: usize) T {
     return std.mem.readInt(T, bytes[at..][0..@sizeOf(T)], .little);
 }
 
-/// FNV-1a, 64-bit.
-pub fn fnv1a64(bytes: []const u8) u64 {
-    var h: u64 = 0xcbf2_9ce4_8422_2325;
-    for (bytes) |b| h = (h ^ b) *% 0x0100_0000_01b3;
-    return h;
-}
-
 const testing = std.testing;
 const test_data = @import("test_data.zig");
 
-test "fnv1a64 known vectors (same as the generator's tests)" {
-    try testing.expectEqual(0xcbf2_9ce4_8422_2325, fnv1a64(""));
-    try testing.expectEqual(0xaf63_dc4c_8601_ec8c, fnv1a64("a"));
+test "std's FNV-1a 64 is the generator's (its known vectors)" {
+    try testing.expectEqual(0xcbf2_9ce4_8422_2325, std.hash.Fnv1a_64.hash(""));
+    try testing.expectEqual(0xaf63_dc4c_8601_ec8c, std.hash.Fnv1a_64.hash("a"));
 }
 
 test "parses a real chunk" {
@@ -166,6 +159,6 @@ test "rejects cell runs that don't tile the tris" {
     var copy = test_data.chunk_bytes.*;
     // Bump the second cell's first_tri, then re-sign the payload.
     std.mem.writeInt(u32, copy[header_len + 24 + 16 ..][0..4], 1, .little);
-    std.mem.writeInt(u64, copy[32..40], fnv1a64(copy[header_len..]), .little);
+    std.mem.writeInt(u64, copy[32..40], std.hash.Fnv1a_64.hash(copy[header_len..]), .little);
     try testing.expectError(error.BadCellRun, parse(&copy));
 }

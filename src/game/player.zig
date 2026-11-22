@@ -57,7 +57,7 @@ pub fn register(world: *ecs.world_t, ground: *const core.ground.Ground) void {
     ecs.COMPONENT(world, Intent);
     flecs.addSystem(world, "steer", ecs.PreUpdate, steer, .{});
     // ground is only read: safe on any worker.
-    flecs.addSystem(world, "walk", ecs.OnUpdate, walk, .{ .ctx = @constCast(ground) });
+    flecs.addSystem(world, "walk", ecs.OnUpdate, walk, .{ .ctx = ground });
 }
 
 /// Spawns the player standing at `at` (on the ground), looking along `yaw`.
@@ -71,6 +71,21 @@ pub fn spawn(world: *ecs.world_t, at: Vec3, yaw: f32) ecs.entity_t {
     flecs.set(world, e, Previous, .{ .at = at, .eye_y = at.y + eye_height });
     flecs.set(world, e, Intent, .{});
     return e;
+}
+
+/// What the player sees: eye position and unit view direction.
+pub const View = struct { eye: Vec3, dir: Vec3 };
+
+/// The player's view, the eye interpolated `alpha` (`FixedClock.alpha`) of
+/// the way from the previous step to the latest one. Look isn't
+/// interpolated: it would make the mouse lag.
+pub fn view(world: *ecs.world_t, e: ecs.entity_t, alpha: f32) View {
+    const pos = ecs.get(world, e, Position).?.at;
+    const prev = ecs.get(world, e, Previous).?;
+    const look = ecs.get(world, e, Look).?;
+    var eye = prev.at.lerp(pos, alpha);
+    eye.y = std.math.lerp(prev.eye_y, ecs.get(world, e, Eye).?.y, alpha);
+    return .{ .eye = eye, .dir = motion.lookDir(look.yaw, look.pitch) };
 }
 
 /// Applies look input, then turns walk input into a velocity along the view.
@@ -101,12 +116,11 @@ const testing = std.testing;
 /// Test ground: level at 0 for x < 1, a wall-high step of `step` beyond.
 const Step = struct {
     step: f32,
-    fn heightAt(ctx: *const anyopaque, x: f32, _: f32) ?f32 {
-        const self: *const Step = @ptrCast(@alignCast(ctx));
+    pub fn heightAt(self: *const Step, x: f32, _: f32) ?f32 {
         return if (x < 1) 0 else self.step;
     }
     fn ground(self: *const Step) core.ground.Ground {
-        return .{ .ctx = self, .heightAtFn = heightAt };
+        return .of(Step, self);
     }
 };
 
@@ -182,15 +196,30 @@ test "look: delta applied once, rate per second, pitch clamped" {
 
 test "no ground ahead: the player stays put" {
     const Edge = struct {
-        fn heightAt(_: *const anyopaque, x: f32, _: f32) ?f32 {
+        pub fn heightAt(_: *const @This(), x: f32, _: f32) ?f32 {
             return if (x < 0) 0 else null;
         }
     };
-    const g: core.ground.Ground = .{ .ctx = undefined, .heightAtFn = Edge.heightAt };
+    const g: core.ground.Ground = .of(Edge, &.{});
     const world = testWorld(&g);
     defer _ = ecs.fini(world);
     const e = spawn(world, .{ .x = -0.01, .y = 0, .z = 0 }, std.math.pi / 2.0);
     ecs.get_mut(world, e, Intent).?.walk = .{ 0, 1 };
     for (0..10) |_| _ = ecs.progress(world, step_dt);
     try testing.expectEqual(-0.01, ecs.get(world, e, Position).?.at.x);
+}
+
+test "view interpolates the eye between steps and looks along Look" {
+    const s: Step = .{ .step = 0 };
+    const g = s.ground();
+    const world = testWorld(&g);
+    defer _ = ecs.fini(world);
+    const e = spawn(world, .{ .x = -10, .y = 0, .z = 0 }, std.math.pi / 2.0);
+    ecs.get_mut(world, e, Intent).?.walk = .{ 0, 1 };
+    _ = ecs.progress(world, step_dt);
+    const half = view(world, e, 0.5);
+    try testing.expectApproxEqAbs(-10 + walk_speed * step_dt / 2, half.eye.x, 1e-5);
+    try testing.expectApproxEqAbs(eye_height, half.eye.y, 1e-5);
+    try testing.expectApproxEqAbs(1, half.dir.x, 1e-6);
+    try testing.expectApproxEqAbs(-10 + walk_speed * step_dt, view(world, e, 1).eye.x, 1e-5);
 }

@@ -9,8 +9,8 @@ pub const version: u32 = 1;
 
 pub const Entry = struct {
     coord: Hex,
-    /// File name inside `terrain/`, NUL-terminated for C file APIs.
-    file: [:0]const u8,
+    /// File name inside `terrain/`.
+    file: []const u8,
     /// The payload hash the file was written with (`Chunk.hash`).
     hash: u64,
 };
@@ -33,19 +33,19 @@ const Json = struct {
 
 pub const Error = error{ UnsupportedVersion, BadHash, BadChunkRadius, Unsorted } || std.json.ParseError(std.json.Scanner);
 
-/// Parses `json`. Everything returned lives in `arena`.
+/// Parses `json`. Everything returned lives in `arena`; `json` can be freed.
 pub fn parse(arena: std.mem.Allocator, json: []const u8) Error!Manifest {
-    const doc = try std.json.parseFromSliceLeaky(Json, arena, json, .{ .ignore_unknown_fields = true });
+    const doc = try std.json.parseFromSliceLeaky(Json, arena, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     if (doc.version != version) return error.UnsupportedVersion;
     if (doc.chunk_radius == 0) return error.BadChunkRadius;
     const chunks = try arena.alloc(Entry, doc.chunks.len);
     for (doc.chunks, chunks, 0..) |c, *e, i| {
         e.* = .{
             .coord = .{ .q = c.q, .r = c.r },
-            .file = try arena.dupeSentinel(u8, c.file, 0),
+            .file = c.file, // copied into `arena` (alloc_always): `json` may be freed
             .hash = std.fmt.parseInt(u64, c.hash, 16) catch return error.BadHash,
         };
-        if (i > 0 and !lessThan(chunks[i - 1].coord, e.coord)) return error.Unsorted;
+        if (i > 0 and chunks[i - 1].coord.order(e.coord) != .lt) return error.Unsorted;
     }
     return .{
         .chunk_radius = doc.chunk_radius,
@@ -55,16 +55,11 @@ pub fn parse(arena: std.mem.Allocator, json: []const u8) Error!Manifest {
     };
 }
 
-fn lessThan(a: Hex, b: Hex) bool {
-    return a.q < b.q or (a.q == b.q and a.r < b.r);
-}
-
 /// The entry for chunk `coord`, or null if the world has no such chunk.
 pub fn find(m: Manifest, coord: Hex) ?Entry {
     const i = std.sort.binarySearch(Entry, m.chunks, coord, struct {
         fn order(key: Hex, e: Entry) std.math.Order {
-            if (key.eql(e.coord)) return .eq;
-            return if (lessThan(key, e.coord)) .lt else .gt;
+            return key.order(e.coord);
         }
     }.order) orelse return null;
     return m.chunks[i];
@@ -98,19 +93,17 @@ test "skips unknown fields; rejects bad versions, hashes and order" {
         \\ "chunks": [{"q": -1, "r": 0, "file": "a.bin", "hash": "00000000000000ff", "cells": 3},
         \\            {"q": 0, "r": -1, "file": "b.bin", "hash": "ffffffffffffffff"}]}
     ;
-    const m = try parse(a, ok);
+    const owned = try testing.allocator.dupe(u8, ok);
+    const m = try parse(a, owned);
+    testing.allocator.free(owned); // the manifest must not point into the JSON
+    try testing.expectEqualStrings("a.bin", m.chunks[0].file);
     try testing.expectEqual(2, m.chunks.len);
     try testing.expectEqual(0xff, m.chunks[0].hash);
     try testing.expectEqual(std.math.maxInt(u64), m.find(.{ .q = 0, .r = -1 }).?.hash);
 
-    const swap = struct {
-        fn f(al: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8) ![]const u8 {
-            return std.mem.replaceOwned(u8, al, text, from, to);
-        }
-    }.f;
-    try testing.expectError(error.UnsupportedVersion, parse(a, try swap(a, ok, "\"version\": 1", "\"version\": 2")));
-    try testing.expectError(error.BadHash, parse(a, try swap(a, ok, "00000000000000ff", "zz")));
-    try testing.expectError(error.BadChunkRadius, parse(a, try swap(a, ok, "\"chunk_radius\": 2", "\"chunk_radius\": 0")));
-    try testing.expectError(error.Unsorted, parse(a, try swap(a, ok, "\"q\": -1", "\"q\": 5")));
+    try testing.expectError(error.UnsupportedVersion, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"version\": 1", "\"version\": 2")));
+    try testing.expectError(error.BadHash, parse(a, try std.mem.replaceOwned(u8, a, ok, "00000000000000ff", "zz")));
+    try testing.expectError(error.BadChunkRadius, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"chunk_radius\": 2", "\"chunk_radius\": 0")));
+    try testing.expectError(error.Unsorted, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"q\": -1", "\"q\": 5")));
     try testing.expectError(error.MissingField, parse(a, "{\"version\": 1}"));
 }

@@ -28,6 +28,11 @@ pub fn eql(a: Hex, b: Hex) bool {
     return a.q == b.q and a.r == b.r;
 }
 
+/// Orders by q, then r: the order the generator writes chunks in.
+pub fn order(a: Hex, b: Hex) std.math.Order {
+    return std.math.order(a.q, b.q).differ() orelse std.math.order(a.r, b.r);
+}
+
 /// Index of `h` in `list`, or null.
 pub fn indexOf(list: []const Hex, h: Hex) ?usize {
     for (list, 0..) |x, i| if (x.eql(h)) return i;
