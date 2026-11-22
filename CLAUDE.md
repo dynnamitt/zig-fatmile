@@ -4,11 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`zig-rayflecs` — Zig scaffold combining **Raylib** (window + rendering, via `raylib-zig`) and **Flecs ECS** (via `zflecs`). `src/main.zig` renders a two-ball orbit demo driven by the ECS. Builds natively and for the browser (`wasm32-emscripten`).
+`zig-fatmile` — Zig scaffold combining **Raylib** (window + rendering, via `raylib-zig`) and **Flecs ECS** (via `zflecs`). `src/main.zig` renders a two-ball orbit demo driven by the ECS. Builds natively and for the browser (`wasm32-emscripten`).
 
-<!-- template -->
-This repo is a GitHub template. `runme1st.sh` renames a generated repo (names, Pages URL, `.fingerprint`) and deletes itself; CI job `build-test` runs it on a throwaway rename and fails if `zig-rayflecs`/`zig_rayflecs` survives outside `.github/`, so new name references need no extra step.
-<!-- /template -->
+**Direction** (issue #1, "a world"): this scaffold grows into a low-poly first-person 3D game on hex terrain. Ground meshes come from the hex layout of the sibling repo `dynnamitt/apicult-desigual-rs`: noise heights, gap quads between hexes, thin black partition lines. A script precomputes one large mesh offline and stores it as chunks that load on demand (no procedural generation at runtime in the first iteration). The player walks at head height with a wobbling camera (gamepad + mouse), cannot climb steep slopes but can always slide down, and has a shovel that lowers the hex under the crosshair (found by raycast). Scenery is Norse pine and oversized mushrooms on ground that is about 60% open, plus walkable rock clusters, in one desert sci-fi palette. An axe and bikes come later; the goal of the game is to find and evolve bikes. Big refinements go into a fork first. The two-ball orbit demo is a placeholder until the first world iteration replaces it.
 
 ## Toolchain
 
@@ -19,7 +17,7 @@ Agent skills are not committed: `skills-lock.json` pins them and `npx skills exp
 ## Commands
 
 ```sh
-zig build                    # compile → zig-out/bin/zig-rayflecs
+zig build                    # compile → zig-out/bin/zig-fatmile
 zig build run                # compile and launch
 zig build run -Dnewcomers=10000   # load test (default 42 newcomer balls)
 zig build run -Dnewcomers=100000 -Dthreads=8   # + Flecs worker threads (native only; default 0)
@@ -33,7 +31,7 @@ The web build installs the Emscripten SDK on first use, into `zig-pkg/<emsdk has
 
 On Linux, raylib's GLFW backend needs X11/GL **dev headers** (`libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl-dev`). `zig build test` does not link raylib, so it works without them.
 
-CI (`.github/workflows/ci.yml`) runs on pull requests (and manually via workflow_dispatch). Job `build-test` runs fmt check → `zig build test` → `zig build`<!-- template --> → template rename check (`runme1st.sh` on a scratch name, then test + build again; skipped once the script is gone)<!-- /template -->. Job `web` runs the emscripten build and uploads `zig-out/web` as the `web` artifact. `.github/workflows/pages.yml` runs `zig build test` and then the same web build on every push to `main`, and deploys it (deploys are never cancelled midway) to GitHub Pages (`https://dynnamitt.github.io/zig-rayflecs/`). That needs Settings → Pages → Source: **GitHub Actions**. Both workflows key the Emscripten SDK cache on the `emsdk` and `raylib_zig` hashes in `build.zig.zon`, which they read with `sed`, so keep those entries in their `.name = .{ ... .hash = "..." }` form.
+CI (`.github/workflows/ci.yml`) runs on pull requests (and manually via workflow_dispatch). Job `build-test` runs fmt check → `zig build test` → `zig build`. Job `web` runs the emscripten build and uploads `zig-out/web` as the `web` artifact. `.github/workflows/pages.yml` runs `zig build test` and then the same web build on every push to `main`, and deploys it (deploys are never cancelled midway) to GitHub Pages (`https://dynnamitt.github.io/zig-fatmile/`). That needs Settings → Pages → Source: **GitHub Actions**. Both workflows key the Emscripten SDK cache on the `emsdk` and `raylib_zig` hashes in `build.zig.zon`, which they read with `sed`, so keep those entries in their `.name = .{ ... .hash = "..." }` form.
 
 ## Dependencies
 

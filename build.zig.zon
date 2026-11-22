@@ -1,7 +1,7 @@
 .{
-    .name = .zig_rayflecs,
+    .name = .zig_fatmile,
     .version = "0.1.0",
-    .fingerprint = 0x413ac02395b7373c,
+    .fingerprint = 0xb3ba1404f26afc7e,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .raylib_zig = .{
