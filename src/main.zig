@@ -38,6 +38,12 @@ var player: ecs.entity_t = undefined;
 var stream: TerrainStream = undefined;
 var ground: core.ground.Ground = undefined;
 var clock: core.FixedClock = .{};
+/// Walk forward without holding anything: R toggles it (web: the page's
+/// auto-walk button sends R), so touchscreens can travel.
+var auto_walk = false;
+/// A touch was down last frame too, so this frame's delta is a drag, not
+/// the jump to where the finger landed.
+var was_touching = false;
 var stats: core.FrameStats = .{};
 
 pub fn main() !void {
@@ -95,17 +101,22 @@ fn frame() callconv(.c) void {
     // the mean, not one frame.
     rl.gl.rlDrawRenderBatchActive();
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
-    hud.drawStats(stats, stream.loaded.len);
+    hud.drawStats(stats, stream.loaded.len, auto_walk);
     hud.drawHint();
 }
 
-/// Mouse, keyboard and gamepad 0 → the player's intent. Mouse look is
+/// Mouse, touch, keyboard and gamepad 0 → the player's intent. Mouse look is
 /// drag-to-look (left button held), with no pointer lock: raylib's web
 /// backend can't report lock state, and a lock the browser drops on Escape
 /// would leave the view spinning with a free mouse. Dragging reads the same
 /// mouse delta on both platforms.
 fn readInput(intent: *game.player.Intent) void {
-    if (rl.isMouseButtonDown(.left)) {
+    if (rl.isKeyPressed(.r)) auto_walk = !auto_walk;
+
+    // A one-finger drag looks too: raylib moves the mouse position with it.
+    const touching = rl.getTouchPointCount() == 1;
+    defer was_touching = touching;
+    if (rl.isMouseButtonDown(.left) or (touching and was_touching)) {
         const d = rl.getMouseDelta();
         intent.look_delta[0] -= d.x * mouse_sensitivity;
         intent.look_delta[1] -= d.y * mouse_sensitivity;
@@ -119,6 +130,7 @@ fn readInput(intent: *game.player.Intent) void {
         turn[0] -= stick(.right_x);
         turn[1] -= stick(.right_y);
     }
+    if (auto_walk) walk[1] += 1; // capped to full speed in core.motion
     intent.walk = walk;
     intent.look_rate = .{ turn[0] * turn_rate, turn[1] * turn_rate };
 }
