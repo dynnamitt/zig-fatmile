@@ -3,6 +3,15 @@
 pub const FixedClock = @import("FixedClock.zig");
 pub const FrameStats = @import("FrameStats.zig");
 pub const palette = @import("palette.zig");
+pub const Vec3 = @import("vec.zig").Vec3;
+pub const Hex = @import("Hex.zig");
+pub const Chunk = @import("Chunk.zig");
+pub const Manifest = @import("Manifest.zig");
+pub const Terrain = @import("Terrain.zig");
+pub const ChunkMesh = @import("ChunkMesh.zig");
+pub const ground = @import("ground.zig");
+pub const streaming = @import("streaming.zig");
+pub const motion = @import("motion.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
