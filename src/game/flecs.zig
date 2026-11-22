@@ -17,14 +17,23 @@ pub fn setPair(world: *ecs.world_t, entity: ecs.entity_t, comptime T: type, targ
     ecs_set_id(world, entity, ecs.pair(ecs.id(T), target), @sizeOf(T), &val);
 }
 
+pub const SystemOptions = struct {
+    /// Query terms after the ones `f`'s parameters give; read them with `ecs.field`.
+    terms: []const ecs.term_t = &.{},
+    /// Shared data for the system, read back as `it.ctx`. Workers read it
+    /// concurrently, so it must not change while `ecs.progress` runs.
+    ctx: ?*anyopaque = null,
+};
+
 /// zflecs' `ADD_SYSTEM_WITH_FILTERS`, plus `multi_threaded` (which it can't
-/// set): every system may split across `ecs.set_threads` workers, so it must
-/// write only the entities it iterates and make structural changes through
-/// `it.world`.
-pub fn addSystem(world: *ecs.world_t, name: [*:0]const u8, phase: ecs.entity_t, comptime f: anytype, filters: []const ecs.term_t) void {
-    var desc = ecs.SYSTEM_DESC_WITH_FILTERS(f, filters);
+/// set) and a context pointer: every system may split across
+/// `ecs.set_threads` workers, so it must write only the entities it iterates
+/// and make structural changes through `it.world`.
+pub fn addSystem(world: *ecs.world_t, name: [*:0]const u8, phase: ecs.entity_t, comptime f: anytype, opts: SystemOptions) void {
+    var desc = ecs.SYSTEM_DESC_WITH_FILTERS(f, opts.terms);
     desc.phase = phase;
     desc.multi_threaded = true;
+    desc.ctx = opts.ctx;
     _ = ecs.SYSTEM(world, name, &desc);
 }
 
@@ -54,9 +63,26 @@ test "addSystem runs once per progress in its phase" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     ecs.COMPONENT(world, Counter);
-    addSystem(world, "bump", ecs.OnUpdate, bump, &.{});
+    addSystem(world, "bump", ecs.OnUpdate, bump, .{});
     const e = ecs.new_id(world);
     set(world, e, Counter, .{ .n = 0 });
     for (0..3) |_| _ = ecs.progress(world, 1.0 / 60.0);
     try std.testing.expectEqual(@as(u32, 3), ecs.get(world, e, Counter).?.n);
+}
+
+fn bumpBy(it: *ecs.iter_t, counters: []Counter) void {
+    const by: *const u32 = @ptrCast(@alignCast(it.ctx.?));
+    for (counters) |*c| c.n += by.*;
+}
+
+test "addSystem passes ctx through to the system" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    ecs.COMPONENT(world, Counter);
+    var by: u32 = 7;
+    addSystem(world, "bump_by", ecs.OnUpdate, bumpBy, .{ .ctx = &by });
+    const e = ecs.new_id(world);
+    set(world, e, Counter, .{ .n = 0 });
+    _ = ecs.progress(world, 1.0 / 60.0);
+    try std.testing.expectEqual(@as(u32, 7), ecs.get(world, e, Counter).?.n);
 }

@@ -47,6 +47,9 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    // Test fixtures: a real chunk and the manifest (src/core/test_data.zig).
+    core_mod.addAnonymousImport("terrain_chunk_0_0", .{ .root_source_file = b.path("terrain/chunk_0_0.bin") });
+    core_mod.addAnonymousImport("terrain_manifest", .{ .root_source_file = b.path("terrain/manifest.json") });
 
     const game_mod = b.createModule(.{
         .root_source_file = b.path("src/game/game.zig"),
@@ -82,6 +85,7 @@ pub fn build(b: *std.Build) !void {
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
+        run_cmd.setCwd(b.path(".")); // the app reads terrain/ relative to the repo root
         run_cmd.step.dependOn(b.getInstallStep());
         run_cmd.addPassthruArgs();
         run_step.dependOn(&run_cmd.step);
@@ -131,7 +135,16 @@ fn addWebBuild(
         .install_dir = .{ .custom = "web" },
         .out_file_name = "index.html", // index.* so the folder serves as-is (GitHub Pages)
     });
-    if (builtin.os.tag == .windows) try useEmccBat(b, emcc_step);
+    const emcc = try emccRun(emcc_step);
+    if (builtin.os.tag == .windows) emcc.argv.items[0].lazy_path.lazy_path = try emsdk.path(b, "upstream/emscripten/emcc.bat");
+    // Pack terrain/ into emscripten's virtual filesystem as /terrain
+    // (index.data, fetched before main), so the app's file reads are the same
+    // as native. emccStep's preload_paths passes a bare string the cache
+    // can't see; a directory arg plus the manifest (whose hashes change with
+    // any chunk) as input reruns emcc when the world changes.
+    emcc.addArg("--preload-file");
+    emcc.addDirectoryArg2(b.path("terrain"), .{ .suffix = "@/terrain" });
+    emcc.addFileInput(b.path("terrain/manifest.json"));
     b.getInstallStep().dependOn(emcc_step);
 
     const emrun = try emsdk.emrunStep(b, b.graph.path(.install_prefix, "web/index.html"), &.{});
@@ -148,14 +161,13 @@ fn findStep(root: *std.Build.Step, name: []const u8) ?*std.Build.Step {
     return null;
 }
 
-/// emcc.py can't be spawned directly on Windows: point emccStep's run step at
-/// emcc.bat. Mirrors raylib-zig's (private) fixEmccOnWindows: patch only the
-/// first Run step, and fail loudly if the layout ever changes.
-fn useEmccBat(b: *std.Build, emcc_step: *std.Build.Step) !void {
+/// emccStep's emcc Run step (its first Run dependency), to add arguments to.
+/// On Windows emcc.py can't be spawned directly, so the caller points it at
+/// emcc.bat, as raylib-zig's (private) fixEmccOnWindows does. Fails loudly if
+/// the layout ever changes.
+fn emccRun(emcc_step: *std.Build.Step) !*std.Build.Step.Run {
     for (emcc_step.dependencies.items) |dep| {
-        const run = dep.cast(std.Build.Step.Run) orelse continue;
-        run.argv.items[0].lazy_path.lazy_path = try rlz.emsdk.path(b, "upstream/emscripten/emcc.bat");
-        return;
+        if (dep.cast(std.Build.Step.Run)) |run| return run;
     }
     return error.EmccRunStepNotFound;
 }
