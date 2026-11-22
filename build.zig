@@ -6,8 +6,6 @@ const zflecs = @import("zflecs");
 // emscripten's default 64 KiB stack overflows in Debug web builds (zig + flecs
 // frames); release builds don't check, so an overflow there corrupts memory.
 const web_stack_size = "1048576";
-// Newcomer balls when -Dnewcomers isn't given; Pages and CI ship this.
-const default_newcomers = 42;
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -39,14 +37,25 @@ pub fn build(b: *std.Build) !void {
     });
     const flecs_lib = zflecs_dep.artifact("flecs");
 
-    // ECS-only code (components + systems). No raylib here, so it tests headless.
-    const sim_mod = b.createModule(.{
-        .root_source_file = b.path("src/sim.zig"),
+    // Module graph (each arrow is an addImport):
+    //   core  — engine-agnostic: clock, frame stats, palette. No deps.
+    //   game  — ECS components + systems. zflecs, core. No raylib.
+    //   exe   — window, loop, render/, platform/. raylib, zflecs, core, game.
+    // core and game are the test roots, so they run headless.
+    const core_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/core.zig"),
         .target = target,
         .optimize = optimize,
     });
-    sim_mod.addImport("zflecs", zflecs_dep.module("root"));
-    sim_mod.linkLibrary(flecs_lib);
+
+    const game_mod = b.createModule(.{
+        .root_source_file = b.path("src/game/game.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    game_mod.addImport("zflecs", zflecs_dep.module("root"));
+    game_mod.addImport("core", core_mod);
+    game_mod.linkLibrary(flecs_lib);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -56,10 +65,9 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("raylib", raylib_dep.module("raylib"));
     exe_mod.linkLibrary(raylib_dep.artifact("raylib"));
     exe_mod.addImport("zflecs", zflecs_dep.module("root"));
-    exe_mod.addImport("sim", sim_mod);
-    // Load test: zig build run -Dnewcomers=100000 -Dthreads=8
+    exe_mod.addImport("core", core_mod);
+    exe_mod.addImport("game", game_mod);
     const config = b.addOptions();
-    config.addOption(u32, "newcomers", b.option(u32, "newcomers", "Newcomer balls to spawn") orelse default_newcomers);
     const threads = b.option(u8, "threads", "Flecs worker threads (native only)") orelse 0;
     if (is_web and threads > 0) return error.ThreadsNotOnWeb; // wasm threads need COOP/COEP, which Pages can't send
     config.addOption(u8, "threads", threads);
@@ -81,8 +89,11 @@ pub fn build(b: *std.Build) !void {
 
     // Filters are compile-time in Zig: zig build test -Dtest-filter="<substring>"
     const test_filters = b.option([]const []const u8, "test-filter", "Only run tests whose name contains this") orelse &.{};
-    const sim_tests = b.addTest(.{ .root_module = sim_mod, .filters = test_filters });
-    b.step("test", "Run unit tests (headless, native only)").dependOn(&b.addRunArtifact(sim_tests).step);
+    const test_step = b.step("test", "Run unit tests (headless, native only)");
+    for ([_]*std.Build.Module{ core_mod, game_mod }) |mod| {
+        const tests = b.addTest(.{ .root_module = mod, .filters = test_filters });
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
 
 /// -Dtarget=wasm32-emscripten: compile the app as a static library, then let

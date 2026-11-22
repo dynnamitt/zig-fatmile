@@ -46,7 +46,7 @@ jobs:
           path: ${{ steps.emsdk.outputs.path }}
           key: ${{ steps.emsdk.outputs.key }}
 
-      # Don't publish a main commit whose sim tests fail (headless, no X11 needed).
+      # Don't publish a main commit whose unit tests fail (headless, no X11 needed).
       - name: Unit tests
         run: zig build test --summary all
 
