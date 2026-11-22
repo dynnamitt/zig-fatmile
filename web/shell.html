@@ -6,19 +6,24 @@
   <title>zig-fatmile</title>
   <style>
     /* Colours: tech-trio.svg palette, as in src/core/palette.zig. */
-    html, body { margin: 0; height: 100%; background: #0e1414; color: #c8a878;
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1414; color: #c8a878;
                  font: 14px system-ui, sans-serif; }
-    body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
-    h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    /* The canvas takes the whole viewport. raylib (FLAG_WINDOW_RESIZABLE)
+       sizes its drawing buffer to window.innerWidth × innerHeight, so CSS
+       pixels map 1:1 to it and mouse coordinates stay right. */
+    canvas { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh;
+             border: 0; outline: none; image-rendering: auto; }
+    /* Overlays on the canvas; they never take mouse input from it. */
+    h1, #status { position: fixed; margin: 0; pointer-events: none; }
+    h1 { top: 12px; left: 16px; font-size: 16px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
-    canvas { display: block; box-sizing: border-box; max-width: 100vw; height: auto;
-             border: 2px solid #2e7e7e; image-rendering: auto; }
+    #status { top: 50%; left: 50%; transform: translate(-50%, -50%); }
     #status:empty { display: none; }
   </style>
 </head>
 <body>
-  <h1>zig-fatmile <span>raylib + flecs</span></h1>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <h1>zig-fatmile <span>raylib + flecs</span></h1>
   <div id="status">loading…</div>
   <script>
     var started = false;
