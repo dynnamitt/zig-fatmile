@@ -24,7 +24,7 @@ pub fn drawStats(stats: core.FrameStats, chunks: usize, auto_walk: bool) void {
 
 /// Bottom-left controls hint.
 pub fn drawHint() void {
-    const text = "drag to look - WASD/stick to walk - R auto-walk - arrows to turn";
+    const text = "drag: look  WASD: walk  R: auto-walk";
     rl.drawText(text, margin, rl.getScreenHeight() - margin - font_size, font_size, rl.getColor(core.palette.sand));
 }
 
