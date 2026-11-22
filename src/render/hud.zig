@@ -21,10 +21,9 @@ pub fn drawStats(stats: core.FrameStats, chunks: usize) void {
     drawLine(std.fmt.bufPrintSentinel(&buf, "{d} chunks", .{chunks}, 0) catch "chunks ?", 2);
 }
 
-/// Bottom-left controls hint, while the mouse isn't captured.
+/// Bottom-left controls hint.
 pub fn drawHint() void {
-    if (rl.isCursorHidden()) return;
-    const text = "click to look - WASD/stick to walk - arrows/right stick to turn";
+    const text = "drag to look - WASD/stick to walk - arrows/right stick to turn";
     rl.drawText(text, margin, rl.getScreenHeight() - margin - font_size, font_size, rl.getColor(core.palette.sand));
 }
 

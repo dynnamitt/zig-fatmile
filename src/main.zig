@@ -95,12 +95,13 @@ fn frame() callconv(.c) void {
     hud.drawHint();
 }
 
-/// Mouse, keyboard and gamepad 0 → the player's intent. Mouse look needs the
-/// cursor captured: a click captures it (on web the browser's pointer lock
-/// needs that click too), Escape releases it on web.
+/// Mouse, keyboard and gamepad 0 → the player's intent. Mouse look is
+/// drag-to-look (left button held), with no pointer lock: raylib's web
+/// backend can't report lock state, and a lock the browser drops on Escape
+/// would leave the view spinning with a free mouse. Dragging reads the same
+/// mouse delta on both platforms.
 fn readInput(intent: *game.player.Intent) void {
-    if (rl.isMouseButtonPressed(.left)) rl.disableCursor();
-    if (rl.isCursorHidden()) {
+    if (rl.isMouseButtonDown(.left)) {
         const d = rl.getMouseDelta();
         intent.look_delta[0] -= d.x * mouse_sensitivity;
         intent.look_delta[1] -= d.y * mouse_sensitivity;

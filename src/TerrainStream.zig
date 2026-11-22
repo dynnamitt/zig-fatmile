@@ -62,7 +62,7 @@ pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
     }
     for (plan.load) |c| s.load(c) catch |err| {
         std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
-        s.broken.append(s.gpa, c) catch {};
+        s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
     };
 }
 

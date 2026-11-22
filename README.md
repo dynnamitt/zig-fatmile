@@ -19,7 +19,7 @@ zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall   # browser build �
 
 A low-poly first-person hex-terrain world: walk, dig with a shovel, clear pines and giant mushrooms, and eventually ride bikes. The plan is in [issue #1](https://github.com/dynnamitt/zig-fatmile/issues/1).
 
-Today you can walk the hex terrain: click to capture the mouse and look, WASD or the left stick to walk, arrows or the right stick to turn. You can't climb slopes steeper than 45°, but you can always go down them. Chunks load around you as you walk; the readout in the corner counts them.
+Today you can walk the hex terrain: drag with the left mouse button to look, WASD or the left stick to walk, arrows or the right stick to turn. You can't climb slopes steeper than 45°, but you can always go down them. Chunks load around you as you walk; the readout in the corner counts them.
 
 ## Terrain
 

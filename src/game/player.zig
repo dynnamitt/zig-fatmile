@@ -78,14 +78,17 @@ pub const View = struct { eye: Vec3, dir: Vec3 };
 
 /// The player's view, the eye interpolated `alpha` (`FixedClock.alpha`) of
 /// the way from the previous step to the latest one. Look isn't
-/// interpolated: it would make the mouse lag.
+/// interpolated: it would make the mouse lag. Mouse motion not yet applied
+/// by a step is added, so frames between steps (displays over 60 Hz) still
+/// turn smoothly.
 pub fn view(world: *ecs.world_t, e: ecs.entity_t, alpha: f32) View {
     const pos = ecs.get(world, e, Position).?.at;
     const prev = ecs.get(world, e, Previous).?;
     const look = ecs.get(world, e, Look).?;
     var eye = prev.at.lerp(pos, alpha);
     eye.y = std.math.lerp(prev.eye_y, ecs.get(world, e, Eye).?.y, alpha);
-    return .{ .eye = eye, .dir = motion.lookDir(look.yaw, look.pitch) };
+    const pending = ecs.get(world, e, Intent).?.look_delta;
+    return .{ .eye = eye, .dir = motion.lookDir(look.yaw + pending[0], motion.clampPitch(look.pitch + pending[1])) };
 }
 
 /// Applies look input, then turns walk input into a velocity along the view.
@@ -222,4 +225,16 @@ test "view interpolates the eye between steps and looks along Look" {
     try testing.expectApproxEqAbs(eye_height, half.eye.y, 1e-5);
     try testing.expectApproxEqAbs(1, half.dir.x, 1e-6);
     try testing.expectApproxEqAbs(-10 + walk_speed * step_dt, view(world, e, 1).eye.x, 1e-5);
+}
+
+test "view shows look input that no step has applied yet" {
+    const s: Step = .{ .step = 0 };
+    const g = s.ground();
+    const world = testWorld(&g);
+    defer _ = ecs.fini(world);
+    const e = spawn(world, .{ .x = 0, .y = 0, .z = 0 }, 0);
+    ecs.get_mut(world, e, Intent).?.look_delta = .{ std.math.pi / 2.0, 0 };
+    try testing.expectApproxEqAbs(1, view(world, e, 0).dir.x, 1e-6);
+    _ = ecs.progress(world, step_dt); // applied once, not twice
+    try testing.expectApproxEqAbs(1, view(world, e, 0).dir.x, 1e-6);
 }

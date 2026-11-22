@@ -31,13 +31,16 @@ const Json = struct {
     chunks: []const struct { q: i32, r: i32, file: []const u8, hash: []const u8 },
 };
 
-pub const Error = error{ UnsupportedVersion, BadHash, BadChunkRadius, Unsorted } || std.json.ParseError(std.json.Scanner);
+pub const Error = error{ UnsupportedVersion, BadHash, BadChunkRadius, BadSettings, Unsorted } || std.json.ParseError(std.json.Scanner);
 
 /// Parses `json`. Everything returned lives in `arena`; `json` can be freed.
 pub fn parse(arena: std.mem.Allocator, json: []const u8) Error!Manifest {
     const doc = try std.json.parseFromSliceLeaky(Json, arena, json, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
     if (doc.version != version) return error.UnsupportedVersion;
     if (doc.chunk_radius == 0) return error.BadChunkRadius;
+    // Divisors downstream (Hex.fromWorld, the colour ramp): zero or NaN would
+    // turn into an @intFromFloat panic far from here.
+    if (!(doc.settings.nominal_hex_radius > 0) or !(doc.settings.max_height > 0)) return error.BadSettings;
     const chunks = try arena.alloc(Entry, doc.chunks.len);
     for (doc.chunks, chunks, 0..) |c, *e, i| {
         e.* = .{
@@ -104,6 +107,8 @@ test "skips unknown fields; rejects bad versions, hashes and order" {
     try testing.expectError(error.UnsupportedVersion, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"version\": 1", "\"version\": 2")));
     try testing.expectError(error.BadHash, parse(a, try std.mem.replaceOwned(u8, a, ok, "00000000000000ff", "zz")));
     try testing.expectError(error.BadChunkRadius, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"chunk_radius\": 2", "\"chunk_radius\": 0")));
+    try testing.expectError(error.BadSettings, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"nominal_hex_radius\": 4", "\"nominal_hex_radius\": 0")));
+    try testing.expectError(error.BadSettings, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"max_height\": 20", "\"max_height\": 0")));
     try testing.expectError(error.Unsorted, parse(a, try std.mem.replaceOwned(u8, a, ok, "\"q\": -1", "\"q\": 5")));
     try testing.expectError(error.MissingField, parse(a, "{\"version\": 1}"));
 }

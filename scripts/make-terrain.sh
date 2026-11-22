@@ -15,8 +15,12 @@ repo_url=https://github.com/dynnamitt/apicult-desigual-rs
 default_commit=e59947bac9356b6cdf706fdb4c9c933083677b0d # adds hex-chunks (apicult PR #18)
 default_args=(--radius 30 --chunk-radius 6)
 
-commit=${1:-$default_commit}
-shift || true
+# A first argument that starts with '-' is a hex-chunks flag, not a commit.
+commit=$default_commit
+if [ $# -gt 0 ] && [ -n "$1" ] && [ "${1#-}" = "$1" ]; then
+	commit=$1
+	shift
+fi
 args=("$@")
 if [ ${#args[@]} -eq 0 ]; then args=("${default_args[@]}"); fi
 
@@ -32,8 +36,10 @@ full_commit=$(git -C "$work/src" rev-parse HEAD)
 
 (cd "$work/src" && cargo build -q --release --bin hex-chunks)
 
+# Generate into the temp dir first, so a failed run leaves terrain/ as it was.
+"$work/src/target/release/hex-chunks" --out "$work/out" "${args[@]}"
 rm -rf "$out"
-"$work/src/target/release/hex-chunks" --out "$out" "${args[@]}"
+mv "$work/out" "$out"
 
 # apicult doesn't commit Cargo.lock, so record what this run resolved: noise
 # or hexx updates could change the output for the same commit and arguments.
