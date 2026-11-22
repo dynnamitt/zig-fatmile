@@ -17,7 +17,7 @@ zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall   # browser build â
 
 ## Where this is going
 
-A low-poly first-person hex-terrain world: walk, dig with a shovel, clear pines and giant mushrooms, and eventually ride bikes. The plan is in [issue #1](https://github.com/dynnamitt/zig-fatmile/issues/1). The orbit demo is a placeholder until then.
+A low-poly first-person hex-terrain world: walk, dig with a shovel, clear pines and giant mushrooms, and eventually ride bikes. The plan is in [issue #1](https://github.com/dynnamitt/zig-fatmile/issues/1). Until then the app draws a placeholder ground grid.
 
 ## Updating deps
 
