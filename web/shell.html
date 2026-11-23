@@ -12,19 +12,26 @@
        sizes its drawing buffer to window.innerWidth × innerHeight, so CSS
        pixels map 1:1 to it and mouse coordinates stay right. */
     canvas { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh;
-             border: 0; outline: none; image-rendering: auto; }
+             border: 0; outline: none; image-rendering: auto;
+             touch-action: none; /* a drag turns the view, never pans or zooms the page */ }
     /* Overlays on the canvas; they never take mouse input from it. */
     h1, #status { position: fixed; margin: 0; pointer-events: none; }
     h1 { top: 12px; left: 16px; font-size: 16px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
     #status { top: 50%; left: 50%; transform: translate(-50%, -50%); }
     #status:empty { display: none; }
+    /* Big enough for a thumb; sits over the canvas, bottom right. */
+    #autowalk { position: fixed; right: 16px; bottom: 44px; padding: 12px 18px;
+                font: 600 16px system-ui, sans-serif; color: #0e1414; background: #c8a878;
+                border: 0; border-radius: 8px; opacity: 0.85; touch-action: manipulation; }
+    #autowalk[aria-pressed="true"] { background: #2e7e7e; color: #c8a878; }
   </style>
 </head>
 <body>
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
   <h1>zig-fatmile <span>raylib + flecs</span></h1>
   <div id="status">loading…</div>
+  <button id="autowalk" type="button" aria-pressed="false" title="auto-walk (R)">auto-walk</button>
   <script>
     var started = false;
     var Module = {
@@ -34,6 +41,20 @@
       print: function (text) { console.log(text); },
       printErr: function (text) { console.error(text); },
     };
+    // The auto-walk button presses R, the game's own toggle, so the game
+    // needs no web-only input path. GLFW reads keyCode, which a synthetic
+    // KeyboardEvent can't set, hence defineProperty. The key is held for
+    // 60 ms: a press and release inside one frame would go unseen.
+    function sendKey(type) {
+      var e = new KeyboardEvent(type, { key: "r", code: "KeyR", bubbles: true });
+      Object.defineProperty(e, "keyCode", { get: function () { return 82; } });
+      window.dispatchEvent(e);
+    }
+    document.getElementById("autowalk").addEventListener("click", function () {
+      sendKey("keydown");
+      setTimeout(function () { sendKey("keyup"); }, 60);
+      this.setAttribute("aria-pressed", this.getAttribute("aria-pressed") !== "true");
+    });
     // Only startup failures replace the canvas status; later errors just log.
     window.onerror = function () { if (!started) Module.setStatus("failed to start — see the console"); };
   </script>

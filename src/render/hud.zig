@@ -12,18 +12,19 @@ const line_gap = 4;
 const buf_len = 64;
 
 /// Draws FPS, `stats` (mean/max CPU ms per frame) and the loaded chunk
-/// count in the top-right corner. Not rl.drawFPS: its lime/orange/red
+/// count (plus "auto-walk" while on) in the top-right corner. Not rl.drawFPS: its lime/orange/red
 /// colours ignore the theme.
-pub fn drawStats(stats: core.FrameStats, chunks: usize) void {
+pub fn drawStats(stats: core.FrameStats, chunks: usize, auto_walk: bool) void {
     var buf: [buf_len]u8 = undefined;
     drawLine(std.fmt.bufPrintSentinel(&buf, "{d} FPS", .{rl.getFPS()}, 0) catch "FPS ?", 0);
     drawLine(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
     drawLine(std.fmt.bufPrintSentinel(&buf, "{d} chunks", .{chunks}, 0) catch "chunks ?", 2);
+    if (auto_walk) drawLine("auto-walk", 3);
 }
 
 /// Bottom-left controls hint.
 pub fn drawHint() void {
-    const text = "drag to look - WASD/stick to walk - arrows/right stick to turn";
+    const text = "drag: look  WASD: walk  R: auto-walk";
     rl.drawText(text, margin, rl.getScreenHeight() - margin - font_size, font_size, rl.getColor(core.palette.sand));
 }
 
