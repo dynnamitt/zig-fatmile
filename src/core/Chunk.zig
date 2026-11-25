@@ -7,7 +7,7 @@
 //! |---|---|
 //! | header (40 B) | `"HXCK"`, `u32 version`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 0`, `u32 0`, `u64 hash` |
 //! | cells | `n_cells × Cell` (24 B) |
-//! | tris | `n_tris × Tri`: per cell 6 face tris, then 2 per gap quad, then junction tris |
+//! | tris | `n_tris × Tri`: per cell 6 face tris (centre, rim corner, rim corner), then 2 per gap quad, then junction tris |
 //!
 //! `hash` is FNV-1a 64 over every byte after the header.
 const std = @import("std");
@@ -20,6 +20,8 @@ pub const magic = "HXCK";
 /// v2: v1 (apicult's old files) without the partition-line segments.
 pub const version: u32 = 2;
 pub const header_len = 40;
+/// Each cell's face fan, first in its run.
+pub const face_tris = 6;
 
 /// One cell's record. Its triangles are `tris[first_tri..][0..triCount()]`.
 pub const Cell = extern struct {
@@ -38,7 +40,7 @@ pub const Cell = extern struct {
 
     /// 6 face tris + 2 per owned gap quad + 1 per owned junction.
     pub fn triCount(c: Cell) u32 {
-        return 6 + 2 * @as(u32, c.n_quads) + c.n_junctions;
+        return face_tris + 2 * @as(u32, c.n_quads) + c.n_junctions;
     }
 };
 
@@ -119,7 +121,7 @@ test "parses a real chunk" {
         quads += cell.n_quads;
         const tris = chunk.cellTris(cell);
         // Face fan: every face tri is flat at the cell's height and starts at the centre.
-        for (tris[0..6]) |t| {
+        for (tris[0..face_tris]) |t| {
             try testing.expectEqual(tris[0].a, t.a);
             for ([_]Vec3{ t.a, t.b, t.c }) |v| try testing.expectEqual(cell.height, v.y);
         }

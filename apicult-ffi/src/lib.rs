@@ -10,7 +10,7 @@
 //! |---|---|
 //! | header (40 B) | `"HXCK"`, `u32 2`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 0`, `u32 0`, `u64 hash` |
 //! | cells | `n_cells × {i32 q, i32 r, f32 height, f32 radius, u32 first_tri, u8 n_quads, u8 n_junctions, u16 0}` |
-//! | tris | `n_tris × 9 f32`: per cell 6 face tris, then 2 per owned gap quad, then junction tris |
+//! | tris | `n_tris × 9 f32`: per cell 6 face tris (centre, rim corner, rim corner), then 2 per owned gap quad, then junction tris |
 //!
 //! `hash` is FNV-1a 64 over every byte after the header. The cells and tris
 //! are what [`apicult_desigual::NoiseWorld`] puts in a chunk's owned stream.
