@@ -1,7 +1,7 @@
-//! One terrain chunk file (`terrain/chunk_<q>_<r>.bin`), read in place: the
-//! slices point into the loaded bytes, nothing is copied. The format is
-//! written by apicult-desigual-rs `src/chunk.rs` (`hex-chunks`); keep the
-//! two in sync.
+//! One terrain chunk's bytes, read in place: the slices point into them,
+//! nothing is copied. apicult-ffi's `ac_chunk` writes the format
+//! (`apicult-ffi/src/lib.rs`; apicult-desigual-rs wrote the same files up to
+//! e59947); keep the two in sync.
 //!
 //! | part | layout (little-endian) |
 //! |---|---|
@@ -52,9 +52,8 @@ comptime {
 }
 
 coord: Hex,
-hash: u64,
-// align(1): the file bytes come from raylib's loader or @embedFile, with no
-// alignment promise. Every target we build for reads unaligned f32s.
+// align(1): the bytes come from apicult-ffi's `Box<[u8]>` or @embedFile, with
+// no alignment promise. Every target we build for reads unaligned f32s.
 cells: []align(1) const Cell,
 tris: []align(1) const Tri,
 lines: []align(1) const Line,
@@ -84,7 +83,6 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     const lines_at: usize = tris_at + @as(usize, @intCast(tris_len));
     const chunk: Chunk = .{
         .coord = .{ .q = readInt(i32, bytes, 8), .r = readInt(i32, bytes, 12) },
-        .hash = hash,
         .cells = std.mem.bytesAsSlice(Cell, bytes[header_len..tris_at]),
         .tris = std.mem.bytesAsSlice(Tri, bytes[tris_at..lines_at]),
         .lines = std.mem.bytesAsSlice(Line, bytes[lines_at..]),

@@ -27,6 +27,10 @@ const web_simulate_infinite_loop = 1;
 const mouse_sensitivity = 0.0025; // rad per pixel
 const turn_rate = 2.2; // rad/s, arrows and right stick at full tilt
 const stick_deadzone = 0.15;
+// Debug camera lift (E up, Q down, never below the eye): climb speed in m/s
+// is lift_base_rate + lift_gain × the current lift, so it speeds up with height.
+const lift_base_rate = 20;
+const lift_gain = 0.5;
 
 /// Root `os` override, so std.heap.page_allocator works on emscripten.
 pub const os = if (builtin.os.tag == .emscripten) @import("platform/emscripten.zig").os else struct {};
@@ -45,12 +49,13 @@ var auto_walk = false;
 /// the jump to where the finger landed.
 var was_touching = false;
 var stats: core.FrameStats = .{};
+/// Debug: metres the camera floats above the player's eye. No upper limit.
+var lift: f32 = 0;
 
 pub fn main() !void {
     rl.setConfigFlags(.{ .window_resizable = true });
     rl.initWindow(width, height, "zig-fatmile");
     defer rl.closeWindow();
-    scene.init();
 
     stream = try .init(std.heap.c_allocator);
     defer stream.deinit();
@@ -87,11 +92,14 @@ fn frame() callconv(.c) void {
     // Between steps, never during one: systems read the terrain.
     const at = ecs.get(world, player, game.player.Position).?.at;
     stream.update(at.x, at.z, TerrainStream.loads_per_frame);
+    lift = @max(0, lift + axis(.e, .q) * (lift_base_rate + lift_gain * lift) * rl.getFrameTime());
 
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(core.palette.background));
-    scene.draw(scene.camera(game.player.view(world, player, clock.alpha())), stream.meshes(), stream.material);
+    var view = game.player.view(world, player, clock.alpha());
+    view.eye.y += lift;
+    scene.draw(scene.camera(view), stream.meshes(), stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't
@@ -101,7 +109,7 @@ fn frame() callconv(.c) void {
     // the mean, not one frame.
     rl.gl.rlDrawRenderBatchActive();
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
-    hud.drawStats(stats, stream.loaded.len, auto_walk);
+    hud.drawStats(stats, stream.loaded.len, auto_walk, lift);
     hud.drawHint();
 }
 

@@ -19,21 +19,21 @@ zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall   # browser build �
 
 A low-poly first-person hex-terrain world: walk, dig with a shovel, clear pines and giant mushrooms, and eventually ride bikes. The plan is in [issue #1](https://github.com/dynnamitt/zig-fatmile/issues/1).
 
-Today you can walk the hex terrain: drag with the left mouse button (or one finger) to look, R or the page's **auto-walk** button to walk on without holding anything, WASD or the left stick to walk, arrows or the right stick to turn. You can't climb slopes steeper than 45°, but you can always go down them. Chunks load around you as you walk; the readout in the corner counts them.
+Today you can walk the hex terrain: drag with the left mouse button (or one finger) to look, R or the page's **auto-walk** button to walk on without holding anything, WASD or the left stick to walk, arrows or the right stick to turn. For debugging, E raises the camera above you and Q lowers it again, with no upper limit; the speed grows with height. You can't climb slopes steeper than 45°, but you can always go down them. Chunks load around you as you walk; the readout in the corner counts them.
 
 ## Terrain
 
-The world is checked in under `terrain/`: chunk files and a manifest, made once by the [apicult-desigual-rs](https://github.com/dynnamitt/apicult-desigual-rs) `hex-chunks` CLI. To change the world, regenerate it (needs git and cargo) and commit the result. CI never generates it.
+Each chunk is generated while you play, by [apicult-desigual-rs](https://github.com/dynnamitt/apicult-desigual-rs) through `apicult-ffi/`, a small Rust crate with a C ABI that `zig build` compiles with cargo and links into both the native and the web build. The world has no edge you could walk to. Its seeds and chunk size are in `src/core/world.zig`; the apicult version is the `rev` in `apicult-ffi/Cargo.toml`.
 
-```sh
-scripts/make-terrain.sh [apicult-commit] [hex-chunks args…]   # default: --radius 30 --chunk-radius 6
-```
+Building needs Rust (cargo), and for web also its target: `rustup target add wasm32-unknown-emscripten`.
 
 ## Updating deps
 
 ```sh
 zig fetch --save git+https://github.com/raylib-zig/raylib-zig#<commit>
 zig fetch --save git+https://github.com/zig-gamedev/zflecs#<commit>
+# apicult: change `rev` in apicult-ffi/Cargo.toml, then
+cargo update --manifest-path apicult-ffi/Cargo.toml -p apicult-desigual
 ```
 
 Live demo, redeployed from `main` on every push: https://dynnamitt.github.io/zig-fatmile/

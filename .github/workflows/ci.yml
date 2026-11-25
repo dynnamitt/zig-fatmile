@@ -14,6 +14,11 @@ jobs:
         with:
           version: 0.17.1
 
+      # apicult-ffi (the Rust chunk generator) is linked into the app.
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+
       # raylib's GLFW backend compiles against X11 + GL headers.
       - name: Install X11/GL dev packages
         run: |
@@ -22,7 +27,12 @@ jobs:
             libxinerama-dev libxi-dev libgl-dev
 
       - name: Format check
-        run: zig fmt --check build.zig build.zig.zon src
+        run: |
+          zig fmt --check build.zig build.zig.zon src
+          cargo fmt --check --manifest-path apicult-ffi/Cargo.toml
+
+      - name: apicult-ffi tests
+        run: cargo test --locked --manifest-path apicult-ffi/Cargo.toml
 
       - name: Unit tests (headless)
         run: zig build test --summary all
@@ -38,6 +48,13 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+
+      # apicult-ffi (the Rust chunk generator) is linked into the wasm. Pinned:
+      # how Rust's emscripten std handles exceptions changes between releases,
+      # and build.zig links with -fwasm-exceptions to match.
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: wasm32-unknown-emscripten
 
       # Cache the installed Emscripten SDK. Its location is the emsdk package
       # hash; which SDK version gets installed is pinned by raylib (via

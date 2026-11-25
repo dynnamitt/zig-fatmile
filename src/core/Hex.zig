@@ -138,6 +138,7 @@ pub fn spiral(center: Hex, radius: u32, out: []Hex) []Hex {
 const testing = std.testing;
 const Chunk = @import("Chunk.zig");
 const test_chunk = @import("test_data.zig");
+const world = @import("world.zig");
 
 test "distance and neighbors" {
     try testing.expectEqual(0, distance(zero, zero));
@@ -192,12 +193,12 @@ test "matches the generator on a real chunk: centres, chunk of each cell" {
     const chunk = try Chunk.parse(test_chunk.chunk_bytes);
     for (chunk.cells) |cell| {
         const h = cell.hex();
-        try testing.expectEqual(chunk.coord, h.toLowerRes(test_chunk.chunk_radius));
+        try testing.expectEqual(chunk.coord, h.toLowerRes(world.chunk_radius));
         // The first face tri's first corner is the cell centre.
         const centre = chunk.tris[cell.first_tri].a;
-        const w = h.toWorld(test_chunk.hex_size);
+        const w = h.toWorld(world.hex_size);
         try testing.expectApproxEqAbs(w[0], centre.x, 1e-4);
         try testing.expectApproxEqAbs(w[1], centre.z, 1e-4);
-        try testing.expectEqual(h, fromWorld(centre.x, centre.z, test_chunk.hex_size));
+        try testing.expectEqual(h, fromWorld(centre.x, centre.z, world.hex_size));
     }
 }

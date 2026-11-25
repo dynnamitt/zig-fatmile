@@ -8,3 +8,6 @@ zig-pkg/
 .claude/skills/*
 !.claude/skills/zig-ray-flecs/
 .claude/worktrees/
+
+# cargo's target dir for apicult-ffi (zig build and cargo test share it)
+apicult-ffi/target/
