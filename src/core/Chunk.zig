@@ -5,9 +5,15 @@
 //!
 //! | part | layout (little-endian) |
 //! |---|---|
-//! | header (40 B) | `"HXCK"`, `u32 version`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 0`, `u32 0`, `u64 hash` |
+//! | header (40 B) | `"HXCK"`, `u32 version`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 n_seams`, `u32 n_seam_tris`, `u64 hash` |
 //! | cells | `n_cells × Cell` (24 B) |
 //! | tris | `n_tris × Tri`: per cell 6 face tris (centre, rim corner, rim corner), then 2 per gap quad, then junction tris |
+//! | seams | `n_seams × Seam` (24 B) |
+//! | seam tris | `n_seam_tris × Tri`: per seam its gap-quad tris (pairs), then its junction tris |
+//!
+//! A seam holds triangles a neighbour chunk (`owner`) owns that touch this
+//! one, so this chunk can fill the gap while the owner isn't loaded; draw it
+//! only while `Seam.drawn` holds (apicult's consumer rule 1).
 //!
 //! `hash` is FNV-1a 64 over every byte after the header.
 const std = @import("std");
@@ -17,8 +23,8 @@ const Vec3 = @import("vec.zig").Vec3;
 const Chunk = @This();
 
 pub const magic = "HXCK";
-/// v2: v1 (apicult's old files) without the partition-line segments.
-pub const version: u32 = 2;
+/// v3: v1 (apicult's old files) without the partition-line segments, plus seams.
+pub const version: u32 = 3;
 pub const header_len = 40;
 /// Each cell's face fan, first in its run.
 pub const face_tris = 6;
@@ -46,10 +52,46 @@ pub const Cell = extern struct {
 
 pub const Tri = extern struct { a: Vec3, b: Vec3, c: Vec3 };
 
+/// Triangles that chunk `owner` owns and that touch this chunk.
+pub const Seam = extern struct {
+    owner_q: i32,
+    owner_r: i32,
+    /// The third chunk a corner junction touches, when `has_also`.
+    also_q: i32,
+    also_r: i32,
+    n_quad_tris: u16,
+    n_junction_tris: u16,
+    has_also: u8,
+    _pad: [3]u8,
+
+    pub fn owner(s: Seam) Hex {
+        return .{ .q = s.owner_q, .r = s.owner_r };
+    }
+
+    pub fn triCount(s: Seam) u32 {
+        return @as(u32, s.n_quad_tris) + s.n_junction_tris;
+    }
+
+    /// apicult's consumer rule 1: whether chunk `carrier` (whose seams hold
+    /// this one) should draw it now. True while no loaded chunk draws these
+    /// triangles: the owner isn't loaded, and for a corner the `also` chunk
+    /// isn't either, or sorts after the carrier in `(q, r)` order (so exactly
+    /// one of two loaded carriers draws it).
+    /// @param carrier {Hex} the chunk whose seams hold `s`.
+    /// @param loaded {anytype} has `fn loaded(Hex) bool`.
+    /// @returns {bool} whether to draw `s`.
+    pub fn drawn(s: Seam, carrier: Hex, loaded: anytype) bool {
+        if (loaded.loaded(s.owner())) return false;
+        if (s.has_also == 0) return true;
+        const also: Hex = .{ .q = s.also_q, .r = s.also_r };
+        return !loaded.loaded(also) or carrier.q < also.q or (carrier.q == also.q and carrier.r < also.r);
+    }
+};
+
 comptime {
     // The file is little-endian and read in place.
     std.debug.assert(builtin.cpu.arch.endian() == .little);
-    std.debug.assert(@sizeOf(Cell) == 24 and @sizeOf(Tri) == 36);
+    std.debug.assert(@sizeOf(Cell) == 24 and @sizeOf(Tri) == 36 and @sizeOf(Seam) == 24);
 }
 
 coord: Hex,
@@ -57,10 +99,13 @@ coord: Hex,
 // no alignment promise. Every target we build for reads unaligned f32s.
 cells: []align(1) const Cell,
 tris: []align(1) const Tri,
+seams: []align(1) const Seam,
+/// Every seam's tris, in `seams` order.
+seam_tris: []align(1) const Tri,
 
-pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, HashMismatch, BadCellRun };
+pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, HashMismatch, BadCellRun, BadSeamRun };
 
-/// Validates `bytes` (header, payload length, hash, cell runs) and returns
+/// Validates `bytes` (header, payload length, hash, cell and seam runs) and returns
 /// views into it. `bytes` must outlive the result.
 pub fn parse(bytes: []const u8) Error!Chunk {
     if (bytes.len < header_len) return error.TooShort;
@@ -68,20 +113,30 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     if (readInt(u32, bytes, 4) != version) return error.UnsupportedVersion;
     const n_cells = readInt(u32, bytes, 16);
     const n_tris = readInt(u32, bytes, 20);
+    const n_seams = readInt(u32, bytes, 24);
+    const n_seam_tris = readInt(u32, bytes, 28);
     const hash = readInt(u64, bytes, 32);
 
     const payload = bytes[header_len..];
-    const cells_len = @as(u64, n_cells) * @sizeOf(Cell);
-    const tris_len = @as(u64, n_tris) * @sizeOf(Tri);
-    if (payload.len != cells_len + tris_len) return error.PayloadLength;
+    const lens = [_]u64{
+        @as(u64, n_cells) * @sizeOf(Cell),
+        @as(u64, n_tris) * @sizeOf(Tri),
+        @as(u64, n_seams) * @sizeOf(Seam),
+        @as(u64, n_seam_tris) * @sizeOf(Tri),
+    };
+    if (payload.len != lens[0] + lens[1] + lens[2] + lens[3]) return error.PayloadLength;
     if (std.hash.Fnv1a_64.hash(payload) != hash) return error.HashMismatch;
 
     // Checked above to fit in the payload, so these fit in usize (wasm32 too).
-    const tris_at: usize = @intCast(header_len + cells_len);
+    const tris_at: usize = @intCast(header_len + lens[0]);
+    const seams_at: usize = tris_at + @as(usize, @intCast(lens[1]));
+    const seam_tris_at: usize = seams_at + @as(usize, @intCast(lens[2]));
     const chunk: Chunk = .{
         .coord = .{ .q = readInt(i32, bytes, 8), .r = readInt(i32, bytes, 12) },
         .cells = std.mem.bytesAsSlice(Cell, bytes[header_len..tris_at]),
-        .tris = std.mem.bytesAsSlice(Tri, bytes[tris_at..]),
+        .tris = std.mem.bytesAsSlice(Tri, bytes[tris_at..seams_at]),
+        .seams = std.mem.bytesAsSlice(Seam, bytes[seams_at..seam_tris_at]),
+        .seam_tris = std.mem.bytesAsSlice(Tri, bytes[seam_tris_at..]),
     };
     // Cell runs must tile the tri buffer, so cellTris never reads past it.
     var next: u64 = 0;
@@ -90,7 +145,20 @@ pub fn parse(bytes: []const u8) Error!Chunk {
         next += c.triCount();
     }
     if (next != n_tris) return error.BadCellRun;
+    var seam_total: u64 = 0;
+    for (chunk.seams) |s| {
+        if (s.n_quad_tris % 2 != 0) return error.BadSeamRun; // quads come whole
+        seam_total += s.triCount();
+    }
+    if (seam_total != n_seam_tris) return error.BadSeamRun;
     return chunk;
+}
+
+/// The triangles of seam `i`: its gap-quad tris (pairs), then its junction tris.
+pub fn seamTris(chunk: Chunk, i: usize) []align(1) const Tri {
+    var first: usize = 0;
+    for (chunk.seams[0..i]) |s| first += s.triCount();
+    return chunk.seam_tris[first..][0..chunk.seams[i].triCount()];
 }
 
 /// The triangles `cell` owns.
@@ -115,7 +183,7 @@ test "parses a real chunk" {
     const chunk = try parse(bytes);
     try testing.expectEqual(test_data.chunk_coord, chunk.coord);
     try testing.expect(chunk.cells.len > 0);
-    try testing.expectEqual(bytes.len, header_len + chunk.cells.len * 24 + chunk.tris.len * 36);
+    try testing.expectEqual(bytes.len, header_len + chunk.cells.len * 24 + (chunk.tris.len + chunk.seam_tris.len) * 36 + chunk.seams.len * 24);
     var quads: usize = 0;
     for (chunk.cells) |cell| {
         quads += cell.n_quads;
@@ -144,8 +212,48 @@ test "rejects short, wrong-magic, wrong-version and wrong-length files" {
     copy[0] = 'X';
     try testing.expectError(error.BadMagic, parse(&copy));
     copy = bytes.*;
-    copy[4] = 3;
+    copy[4] = 4;
     try testing.expectError(error.UnsupportedVersion, parse(&copy));
+}
+
+test "seams: neighbour owners, all seam tris accounted for" {
+    const chunk = try parse(test_data.chunk_bytes);
+    try testing.expect(chunk.seams.len > 0);
+    var total: usize = 0;
+    for (chunk.seams, 0..) |s, i| {
+        // Owners are the 6 neighbouring chunks; a corner's `also` is another.
+        try testing.expectEqual(1, Hex.distance(s.owner(), chunk.coord));
+        if (s.has_also != 0) try testing.expectEqual(1, Hex.distance(.{ .q = s.also_q, .r = s.also_r }, chunk.coord));
+        total += chunk.seamTris(i).len;
+    }
+    try testing.expectEqual(chunk.seam_tris.len, total);
+}
+
+test "Seam.drawn: once while its owner is away, corners by (q, r) order" {
+    const Loaded = struct {
+        set: []const Hex,
+        pub fn loaded(l: @This(), c: Hex) bool {
+            return Hex.indexOf(l.set, c) != null;
+        }
+    };
+    const a: Hex = .{ .q = 0, .r = 0 };
+    const owner: Hex = .{ .q = 1, .r = 0 };
+    const also: Hex = .{ .q = 0, .r = 1 };
+    var edge = std.mem.zeroes(Seam);
+    edge.owner_q = owner.q;
+    try testing.expect(edge.drawn(a, Loaded{ .set = &.{a} }));
+    try testing.expect(!edge.drawn(a, Loaded{ .set = &.{ a, owner } }));
+    var corner = edge;
+    corner.has_also = 1;
+    corner.also_r = also.r;
+    try testing.expect(corner.drawn(a, Loaded{ .set = &.{a} }));
+    // Both carriers loaded: only the one sorting first draws it.
+    try testing.expect(corner.drawn(a, Loaded{ .set = &.{ a, also } }));
+    var mirrored = corner;
+    mirrored.also_q = a.q;
+    mirrored.also_r = a.r;
+    try testing.expect(!mirrored.drawn(also, Loaded{ .set = &.{ a, also } }));
+    try testing.expect(!corner.drawn(a, Loaded{ .set = &.{ a, also, owner } }));
 }
 
 test "rejects cell runs that don't tile the tris" {

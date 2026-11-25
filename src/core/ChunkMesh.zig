@@ -38,31 +38,20 @@ pub fn vertexCount(m: ChunkMesh) usize {
     return m.positions.len / 3;
 }
 
+/// The mesh of `chunk`'s own triangles.
 pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{OutOfMemory}!ChunkMesh {
-    const n = chunk.tris.len * 3;
-    const positions = try allocator.alloc(f32, n * 3);
-    errdefer allocator.free(positions);
-    const colors = try allocator.alloc(u8, n * 4);
-    errdefer allocator.free(colors);
-    const rims = try allocator.alloc(f32, n * 2);
-    const out: ChunkMesh = .{ .positions = positions, .colors = colors, .rims = rims };
-
-    const sun = style.sun.normalize();
-    var w: Writer = .{ .mesh = out };
-    for (chunk.cells) |cell| {
-        const tris = chunk.cellTris(cell);
-        const quads = tris[Chunk.face_tris..][0 .. 2 * @as(usize, cell.n_quads)];
-        for (tris, 0..) |t, i| {
-            const up = upFacing(t);
-            const avg = (t.a.y + t.b.y + t.c.y) / 3;
-            const light = style.ambient + (1 - style.ambient) * @max(0, up.normal.dot(sun));
-            const in_quad = i >= Chunk.face_tris and i < Chunk.face_tris + quads.len;
-            const rim: ?Rims = if (in_quad) quadRims(quads[(i - Chunk.face_tris) & ~@as(usize, 1) ..][0..2].*) else null;
-            w.tri(up, palette.shade(palette.ground(avg / style.max_height), light), rim);
-        }
-    }
+    var w: Writer = try .init(allocator, chunk.tris.len, style);
+    for (chunk.cells) |cell| w.run(chunk.cellTris(cell), Chunk.face_tris, 2 * @as(usize, cell.n_quads));
     std.debug.assert(w.n == chunk.tris.len);
-    return out;
+    return w.mesh;
+}
+
+/// The mesh of `chunk`'s seam `i`: gap quads and junctions only, no faces.
+pub fn buildSeam(allocator: std.mem.Allocator, chunk: Chunk, i: usize, style: Style) error{OutOfMemory}!ChunkMesh {
+    const tris = chunk.seamTris(i);
+    var w: Writer = try .init(allocator, tris.len, style);
+    w.run(tris, 0, chunk.seams[i].n_quad_tris);
+    return w.mesh;
 }
 
 pub fn deinit(m: ChunkMesh, allocator: std.mem.Allocator) void {
@@ -98,7 +87,33 @@ pub fn upFacing(t: Chunk.Tri) UpTri {
 
 const Writer = struct {
     mesh: ChunkMesh,
+    sun: Vec3,
+    style: Style,
     n: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, n_tris: usize, style: Style) error{OutOfMemory}!Writer {
+        const n = n_tris * 3;
+        const positions = try allocator.alloc(f32, n * 3);
+        errdefer allocator.free(positions);
+        const colors = try allocator.alloc(u8, n * 4);
+        errdefer allocator.free(colors);
+        const rims = try allocator.alloc(f32, n * 2);
+        return .{ .mesh = .{ .positions = positions, .colors = colors, .rims = rims }, .sun = style.sun.normalize(), .style = style };
+    }
+
+    /// Writes a run of tris: `faces` face tris, then `quad_tris` gap-quad
+    /// tris in `[a,b,c], [a,c,d]` pairs, then junction tris.
+    fn run(w: *Writer, tris: []align(1) const Chunk.Tri, faces: usize, quad_tris: usize) void {
+        const quads = tris[faces..][0..quad_tris];
+        for (tris, 0..) |t, i| {
+            const up = upFacing(t);
+            const avg = (t.a.y + t.b.y + t.c.y) / 3;
+            const light = w.style.ambient + (1 - w.style.ambient) * @max(0, up.normal.dot(w.sun));
+            const in_quad = i >= faces and i < faces + quad_tris;
+            const rims: ?Rims = if (in_quad) quadRims(quads[(i - faces) & ~@as(usize, 1) ..][0..2].*) else null;
+            w.tri(up, palette.shade(palette.ground(avg / w.style.max_height), light), rims);
+        }
+    }
 
     /// `rims`: the gap quad's rim edges if the tri is half of one. Each
     /// vertex's distances come from its own position, so winding doesn't matter.
@@ -170,4 +185,24 @@ test "rims: lines only in gap quads, each vertex on one of the quad's rims" {
     try testing.expect(quads > 0);
     const j = chunk.cells[0];
     if (j.n_junctions > 0) try testing.expectEqual(no_rim, m.rims[(j.first_tri + j.triCount() - 1) * 3 * 2]);
+}
+
+test "seam meshes: every seam tri, lines in its quads, none in its junctions" {
+    const chunk = try Chunk.parse(test_data.chunk_bytes);
+    var quad_tris: usize = 0;
+    for (chunk.seams, 0..) |s, i| {
+        const m = try buildSeam(testing.allocator, chunk, i, .{});
+        defer m.deinit(testing.allocator);
+        try testing.expectEqual(3 * s.triCount(), m.vertexCount());
+        for (0..m.vertexCount()) |v| {
+            const r = m.rims[v * 2 ..][0..2];
+            if (v < 3 * @as(usize, s.n_quad_tris)) {
+                try testing.expectApproxEqAbs(0, @min(r[0], r[1]), 1e-4);
+            } else {
+                try testing.expectEqual(no_rim, r[0]);
+            }
+        }
+        quad_tris += s.n_quad_tris;
+    }
+    try testing.expect(quad_tris > 0);
 }
