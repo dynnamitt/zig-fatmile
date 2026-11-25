@@ -1,7 +1,9 @@
 //! Loads and frees terrain chunks around the player, as `core.streaming`
 //! plans: generates each with apicult-ffi's `ac_chunk` (Rust, linked into
 //! both the native and the web build), parses it into `terrain`, uploads a
-//! mesh per chunk. The world has no edge within any walkable distance
+//! mesh per chunk plus one per seam, and lists what to draw: every chunk's
+//! own mesh and the seams `core.Chunk.Seam.drawn` allows, which fill the gaps
+//! towards chunks that aren't loaded. The world has no edge within any walkable distance
 //! (`core.Hex.toLowerRes` works in f32, which drifts thousands of km out).
 const std = @import("std");
 const rl = @import("raylib");
@@ -14,7 +16,15 @@ pub const range: core.streaming.Range = .{ .load = 1, .keep = 2 };
 /// Most chunks loaded per frame, so a border crossing never hitches.
 pub const loads_per_frame = 2;
 
-const Loaded = struct { coord: core.Hex, bytes: []u8, mesh: rl.Mesh };
+const Loaded = struct {
+    coord: core.Hex,
+    bytes: []u8,
+    /// Views into `bytes`.
+    chunk: core.Chunk,
+    mesh: rl.Mesh,
+    /// One per `chunk.seams` entry.
+    seams: []rl.Mesh,
+};
 
 /// apicult-ffi (`apicult-ffi/src/lib.rs`): HXCK bytes of chunk `q`, `r`, freed with `ac_free`.
 extern fn ac_chunk(chunk_radius: u32, hex_size: f32, max_height: f32, height_seed: u32, radius_seed: u32, q: i32, r: i32, out_len: *usize) [*]u8;
@@ -25,6 +35,8 @@ terrain: core.Terrain,
 loaded: std.MultiArrayList(Loaded) = .empty,
 /// Chunks that failed to load, so they aren't retried every frame.
 broken: std.ArrayList(core.Hex) = .empty,
+/// What to draw this frame; rebuilt by `update`.
+visible: std.ArrayList(rl.Mesh) = .empty,
 material: rl.Material,
 
 /// Call `deinit` before closing the window.
@@ -40,6 +52,7 @@ pub fn deinit(s: *TerrainStream) void {
     while (s.loaded.len > 0) s.unload(0);
     s.loaded.deinit(s.gpa);
     s.broken.deinit(s.gpa);
+    s.visible.deinit(s.gpa);
     s.terrain.deinit();
     rl.unloadMaterial(s.material);
 }
@@ -57,11 +70,32 @@ pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
         std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
         s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
     };
+    s.listVisible() catch std.log.err("out of memory: some terrain isn't drawn this frame", .{});
 }
 
-/// The GPU meshes of every loaded chunk.
+/// The GPU meshes to draw: every loaded chunk's own mesh, and each seam
+/// while no loaded chunk draws its triangles.
 pub fn meshes(s: TerrainStream) []const rl.Mesh {
-    return s.loaded.items(.mesh);
+    return s.visible.items;
+}
+
+/// Which chunks are loaded, for `Seam.drawn`.
+const LoadedSet = struct {
+    coords: []const core.Hex,
+    pub fn loaded(l: LoadedSet, c: core.Hex) bool {
+        return core.Hex.indexOf(l.coords, c) != null;
+    }
+};
+
+fn listVisible(s: *TerrainStream) !void {
+    s.visible.clearRetainingCapacity();
+    const set: LoadedSet = .{ .coords = s.loaded.items(.coord) };
+    for (set.coords, s.loaded.items(.chunk), s.loaded.items(.mesh), s.loaded.items(.seams)) |coord, chunk, mesh, seam_meshes| {
+        try s.visible.append(s.gpa, mesh);
+        for (chunk.seams, seam_meshes) |seam, m| {
+            if (seam.drawn(coord, set)) try s.visible.append(s.gpa, m);
+        }
+    }
 }
 
 /// What `core.streaming.plan` may load: any chunk that hasn't failed.
@@ -80,17 +114,29 @@ fn load(s: *TerrainStream, coord: core.Hex) !void {
     const chunk = try core.Chunk.parse(bytes);
     if (!chunk.coord.eql(coord)) return error.WrongChunk;
 
+    const seams = try s.gpa.alloc(rl.Mesh, chunk.seams.len);
+    errdefer s.gpa.free(seams);
+    var uploaded: usize = 0;
+    errdefer for (seams[0..uploaded]) |m| rl.unloadMesh(m);
+    for (seams, 0..) |*m, i| {
+        const seam_cpu = try core.ChunkMesh.buildSeam(s.gpa, chunk, i, .{});
+        defer seam_cpu.deinit(s.gpa);
+        m.* = terrain_render.upload(seam_cpu);
+        uploaded += 1;
+    }
     const cpu = try core.ChunkMesh.build(s.gpa, chunk, .{});
     defer cpu.deinit(s.gpa);
     try s.loaded.ensureUnusedCapacity(s.gpa, 1);
     try s.terrain.insert(chunk);
-    s.loaded.appendAssumeCapacity(.{ .coord = coord, .bytes = bytes, .mesh = terrain_render.upload(cpu) });
+    s.loaded.appendAssumeCapacity(.{ .coord = coord, .bytes = bytes, .chunk = chunk, .mesh = terrain_render.upload(cpu), .seams = seams });
 }
 
 fn unload(s: *TerrainStream, i: usize) void {
     const l = s.loaded.get(i);
     s.terrain.remove(l.coord);
     rl.unloadMesh(l.mesh);
+    for (l.seams) |m| rl.unloadMesh(m);
+    s.gpa.free(l.seams);
     ac_free(l.bytes.ptr, l.bytes.len);
     s.loaded.swapRemove(i);
 }

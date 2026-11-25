@@ -1,17 +1,23 @@
 //! Chunk meshes on the GPU: one raylib `Mesh` per chunk, uploaded once, and
 //! the terrain shader. The shader draws the baked vertex colours and paints
-//! the partition lines inside the gap quads, against each cell's rim, from
-//! the per-vertex rim distances in `core.ChunkMesh.rims`: on the surface, so
-//! they can't float above the ground, and the faces stay clean.
+//! the partition lines along all four edges of every gap quad, inside it,
+//! from the per-vertex edge distances in `core.ChunkMesh.rims` and
+//! `.bridges`: on the surface, so they can't float above the ground, and the
+//! faces stay clean.
 const std = @import("std");
 const rl = @import("raylib");
 const core = @import("core");
 
-/// Line width in metres, measured into the gap from a cell's rim. Far away
+/// Line width in metres, measured into the gap quad from its edges. Far away
 /// the shader widens it to `min_line_px` pixels, so distant lines don't break
 /// up; its edge is blended over one pixel.
 const line_width: f32 = 0.08;
 const min_line_px: f32 = 1.0;
+/// Line colour by height: `palette.line` in the valleys, blending to
+/// `palette.line_high` on the ridges. The blend runs over the band of heights
+/// the noise mostly yields (as fractions of `core.world.max_height`).
+const line_low: f32 = 0.2;
+const line_high: f32 = 0.8;
 
 // One shader body for every backend; the header adapts it to the GLSL that
 // raylib's graphics API (rlGetVersion) speaks. The same code on web and
@@ -38,27 +44,39 @@ const glsl_300es: Headers = .{
 const vs_body =
     \\IN vec3 vertexPosition;
     \\IN vec2 vertexTexCoord;
+    \\IN vec2 vertexTexCoord2;
     \\IN vec4 vertexColor;
     \\uniform mat4 mvp;
     \\OUT vec4 color;
     \\OUT vec2 rims;
+    \\OUT vec2 bridges;
+    \\OUT float height;
     \\void main() {
     \\    color = vertexColor;
     \\    rims = vertexTexCoord;
+    \\    bridges = vertexTexCoord2;
+    \\    height = vertexPosition.y;
     \\    gl_Position = mvp * vec4(vertexPosition, 1.0);
     \\}
 ;
 const fs_body =
     \\IN vec4 color;
     \\IN vec2 rims;
+    \\IN vec2 bridges;
+    \\IN float height;
     \\uniform float lineWidth;
     \\uniform float minLinePx;
     \\uniform vec4 lineColor;
+    \\uniform vec4 lineColorHigh;
+    \\uniform float lineLow;
+    \\uniform float lineHigh;
     \\void main() {
-    \\    float d = min(rims.x, rims.y);
+    \\    float d = min(min(rims.x, rims.y), min(bridges.x, bridges.y));
     \\    float px = fwidth(d);
     \\    float width = max(lineWidth, px * minLinePx);
-    \\    FRAG_COLOR = mix(lineColor, color, smoothstep(width - px, width, d));
+    \\    float up = smoothstep(lineLow, lineHigh, height);
+    \\    vec4 line = mix(lineColor, lineColorHigh, up);
+    \\    FRAG_COLOR = mix(line, color, smoothstep(width - px, width, d));
     \\}
 ;
 
@@ -71,10 +89,12 @@ pub fn upload(m: core.ChunkMesh) rl.Mesh {
     mesh.vertices = m.positions.ptr;
     mesh.colors = m.colors.ptr;
     mesh.texcoords = m.rims.ptr;
+    mesh.texcoords2 = m.bridges.ptr;
     rl.uploadMesh(&mesh, false);
     mesh.vertices = null;
     mesh.colors = null;
     mesh.texcoords = null;
+    mesh.texcoords2 = null;
     return mesh;
 }
 
@@ -96,6 +116,12 @@ pub fn loadMaterial() !rl.Material {
     rl.setShaderValue(shader, rl.getShaderLocation(shader, "minLinePx"), &min_line_px, .float);
     const line_color = rl.colorNormalize(rl.getColor(core.palette.line));
     rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColor"), &line_color, .vec4);
+    const line_color_high = rl.colorNormalize(rl.getColor(core.palette.line_high));
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColorHigh"), &line_color_high, .vec4);
+    const low = line_low * core.world.max_height;
+    const high = line_high * core.world.max_height;
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineLow"), &low, .float);
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineHigh"), &high, .float);
 
     var material = try rl.loadMaterialDefault();
     material.shader = shader;

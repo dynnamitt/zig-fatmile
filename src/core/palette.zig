@@ -7,7 +7,9 @@ pub const teal: u32 = 0x2E7E7EFF;
 pub const sand: u32 = 0xC8A878FF;
 
 /// Partition lines between hexes.
-pub const line: u32 = 0x000000FF;
+pub const line: u32 = 0x1E4A48FF; // deep teal, the ground ramp's bottom
+/// Partition lines on the ridges; the terrain shader blends from `line` by height.
+pub const line_high: u32 = 0x7A3A1EFF; // deep copper
 
 /// Ground colour by height, low to high: teal hollows, sand slopes, pale crests.
 pub const ground_stops = [_]u32{ 0x1E4A48FF, teal, sand, 0xE8DCB8FF };

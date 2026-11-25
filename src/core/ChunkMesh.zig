@@ -1,8 +1,8 @@
 //! A chunk's renderable triangles, as flat vertex arrays ready for a GPU
 //! upload: terrain tris coloured by height with the sun's light baked in per
-//! triangle, and per vertex its distances to the two cell rims of the gap
-//! quad it lies in, from which the terrain shader paints the partition lines
-//! into the gaps, against each cell's rim. Faces stay clean.
+//! triangle, and per vertex its distances to the four edges of the gap quad
+//! it lies in, from which the terrain shader outlines every gap quad.
+//! Faces stay clean.
 const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const Vec3 = @import("vec.zig").Vec3;
@@ -10,7 +10,7 @@ const palette = @import("palette.zig");
 const world = @import("world.zig");
 const ChunkMesh = @This();
 
-/// Rim distance on faces and junction tris: far past any line width.
+/// Edge distance on faces and junction tris: far past any line width.
 pub const no_rim = 1e3;
 
 pub const Style = struct {
@@ -30,52 +30,50 @@ colors: []u8,
 /// metres to the quad's two rim edges (the owning cell's, then its
 /// neighbour's); elsewhere `no_rim` twice.
 rims: []f32,
+/// 2 floats per vertex (the second GPU texcoord): likewise, to the quad's
+/// two bridge edges, which cross the gap.
+bridges: []f32,
 
-/// A gap quad's two rim edges, each a segment along one cell's side.
-const Rims = [2][2]Vec3;
+/// A gap quad's edges: its two rims (each along one cell's side), then its
+/// two bridges. Each lies wholly in one of the quad's two tris.
+const Edges = [4][2]Vec3;
 
 pub fn vertexCount(m: ChunkMesh) usize {
     return m.positions.len / 3;
 }
 
+/// The mesh of `chunk`'s own triangles.
 pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{OutOfMemory}!ChunkMesh {
-    const n = chunk.tris.len * 3;
-    const positions = try allocator.alloc(f32, n * 3);
-    errdefer allocator.free(positions);
-    const colors = try allocator.alloc(u8, n * 4);
-    errdefer allocator.free(colors);
-    const rims = try allocator.alloc(f32, n * 2);
-    const out: ChunkMesh = .{ .positions = positions, .colors = colors, .rims = rims };
-
-    const sun = style.sun.normalize();
-    var w: Writer = .{ .mesh = out };
-    for (chunk.cells) |cell| {
-        const tris = chunk.cellTris(cell);
-        const quads = tris[Chunk.face_tris..][0 .. 2 * @as(usize, cell.n_quads)];
-        for (tris, 0..) |t, i| {
-            const up = upFacing(t);
-            const avg = (t.a.y + t.b.y + t.c.y) / 3;
-            const light = style.ambient + (1 - style.ambient) * @max(0, up.normal.dot(sun));
-            const in_quad = i >= Chunk.face_tris and i < Chunk.face_tris + quads.len;
-            const rim: ?Rims = if (in_quad) quadRims(quads[(i - Chunk.face_tris) & ~@as(usize, 1) ..][0..2].*) else null;
-            w.tri(up, palette.shade(palette.ground(avg / style.max_height), light), rim);
-        }
-    }
+    var w: Writer = try .init(allocator, chunk.tris.len, style);
+    for (chunk.cells) |cell| w.run(chunk.cellTris(cell), Chunk.face_tris, 2 * @as(usize, cell.n_quads));
     std.debug.assert(w.n == chunk.tris.len);
-    return out;
+    return w.mesh;
+}
+
+/// The mesh of `chunk`'s seam `i`: gap quads and junctions only, no faces.
+pub fn buildSeam(allocator: std.mem.Allocator, chunk: Chunk, i: usize, style: Style) error{OutOfMemory}!ChunkMesh {
+    const tris = chunk.seamTris(i);
+    var w: Writer = try .init(allocator, tris.len, style);
+    w.run(tris, 0, chunk.seams[i].n_quad_tris);
+    return w.mesh;
 }
 
 pub fn deinit(m: ChunkMesh, allocator: std.mem.Allocator) void {
     allocator.free(m.positions);
     allocator.free(m.colors);
     allocator.free(m.rims);
+    allocator.free(m.bridges);
 }
 
-/// The rim edges of the gap quad `[a,b,c], [a,c,d]`: `d`–`a` lies along the
-/// owning cell's side and `b`–`c` along its neighbour's (`a`–`b` and `c`–`d`
-/// bridge the gap), as apicult's `owned_tris_into` emits it.
-fn quadRims(pair: [2]Chunk.Tri) Rims {
-    return .{ .{ pair[1].c, pair[0].a }, .{ pair[0].b, pair[0].c } };
+/// The edges of the gap quad `[a,b,c], [a,c,d]`: `d`–`a` lies along the
+/// owning cell's side and `b`–`c` along its neighbour's; `a`–`b` and `c`–`d`
+/// bridge the gap, as apicult's `owned_tris_into` emits it.
+fn quadEdges(pair: [2]Chunk.Tri) Edges {
+    const a = pair[0].a;
+    const b = pair[0].b;
+    const c = pair[0].c;
+    const d = pair[1].c;
+    return .{ .{ d, a }, .{ b, c }, .{ a, b }, .{ c, d } };
 }
 
 /// Distance from `p` to the line through `l[0]` and `l[1]`.
@@ -98,16 +96,50 @@ pub fn upFacing(t: Chunk.Tri) UpTri {
 
 const Writer = struct {
     mesh: ChunkMesh,
+    sun: Vec3,
+    style: Style,
     n: usize = 0,
 
-    /// `rims`: the gap quad's rim edges if the tri is half of one. Each
-    /// vertex's distances come from its own position, so winding doesn't matter.
-    fn tri(w: *Writer, up: UpTri, color: u32, rims: ?Rims) void {
+    fn init(allocator: std.mem.Allocator, n_tris: usize, style: Style) error{OutOfMemory}!Writer {
+        const n = n_tris * 3;
+        const positions = try allocator.alloc(f32, n * 3);
+        errdefer allocator.free(positions);
+        const colors = try allocator.alloc(u8, n * 4);
+        errdefer allocator.free(colors);
+        const rims = try allocator.alloc(f32, n * 2);
+        errdefer allocator.free(rims);
+        const bridges = try allocator.alloc(f32, n * 2);
+        return .{ .mesh = .{ .positions = positions, .colors = colors, .rims = rims, .bridges = bridges }, .sun = style.sun.normalize(), .style = style };
+    }
+
+    /// Writes a run of tris: `faces` face tris, then `quad_tris` gap-quad
+    /// tris in `[a,b,c], [a,c,d]` pairs, then junction tris.
+    fn run(w: *Writer, tris: []align(1) const Chunk.Tri, faces: usize, quad_tris: usize) void {
+        const quads = tris[faces..][0..quad_tris];
+        for (tris, 0..) |t, i| {
+            const up = upFacing(t);
+            const avg = (t.a.y + t.b.y + t.c.y) / 3;
+            const light = w.style.ambient + (1 - w.style.ambient) * @max(0, up.normal.dot(w.sun));
+            const in_quad = i >= faces and i < faces + quad_tris;
+            const edges: ?Edges = if (in_quad) quadEdges(quads[(i - faces) & ~@as(usize, 1) ..][0..2].*) else null;
+            w.tri(up, palette.shade(palette.ground(avg / w.style.max_height), light), edges);
+        }
+    }
+
+    /// `edges`: the gap quad's edges if the tri is half of one. Each vertex's
+    /// distances come from its own position, so winding doesn't matter.
+    fn tri(w: *Writer, up: UpTri, color: u32, edges: ?Edges) void {
         for ([_]Vec3{ up.tri.a, up.tri.b, up.tri.c }, 0..) |v, k| {
             const i = w.n * 3 + k;
             w.mesh.positions[i * 3 ..][0..3].* = .{ v.x, v.y, v.z };
             std.mem.writeInt(u32, w.mesh.colors[i * 4 ..][0..4], color, .big); // RGBA byte order
-            w.mesh.rims[i * 2 ..][0..2].* = if (rims) |r| .{ lineDistance(v, r[0]), lineDistance(v, r[1]) } else @splat(no_rim);
+            const e = edges orelse {
+                w.mesh.rims[i * 2 ..][0..2].* = @splat(no_rim);
+                w.mesh.bridges[i * 2 ..][0..2].* = @splat(no_rim);
+                continue;
+            };
+            w.mesh.rims[i * 2 ..][0..2].* = .{ lineDistance(v, e[0]), lineDistance(v, e[1]) };
+            w.mesh.bridges[i * 2 ..][0..2].* = .{ lineDistance(v, e[2]), lineDistance(v, e[3]) };
         }
         w.n += 1;
     }
@@ -157,17 +189,40 @@ test "rims: lines only in gap quads, each vertex on one of the quad's rims" {
             const qv = v + (Chunk.face_tris + q) * 3;
             for (0..3) |k| {
                 const r = m.rims[(qv + k) * 2 ..][0..2];
-                // Every quad corner sits on one rim, across the gap from the other.
+                // Every quad corner sits on one rim, across the gap from the
+                // other, and on one bridge.
                 try testing.expectApproxEqAbs(0, @min(r[0], r[1]), 1e-4);
                 try testing.expect(@max(r[0], r[1]) > 0);
+                const br = m.bridges[(qv + k) * 2 ..][0..2];
+                try testing.expectApproxEqAbs(0, @min(br[0], br[1]), 1e-4);
             }
             quads += 1;
         }
         // The owning cell's rim is one of its sides: as long as its radius.
         const pair = chunk.cellTris(cell)[Chunk.face_tris..][0..2].*;
-        if (cell.n_quads > 0) try testing.expectApproxEqAbs(cell.radius, quadRims(pair)[0][1].sub(quadRims(pair)[0][0]).length(), 1e-4);
+        if (cell.n_quads > 0) try testing.expectApproxEqAbs(cell.radius, quadEdges(pair)[0][1].sub(quadEdges(pair)[0][0]).length(), 1e-4);
     }
     try testing.expect(quads > 0);
     const j = chunk.cells[0];
     if (j.n_junctions > 0) try testing.expectEqual(no_rim, m.rims[(j.first_tri + j.triCount() - 1) * 3 * 2]);
+}
+
+test "seam meshes: every seam tri, lines in its quads, none in its junctions" {
+    const chunk = try Chunk.parse(test_data.chunk_bytes);
+    var quad_tris: usize = 0;
+    for (chunk.seams, 0..) |s, i| {
+        const m = try buildSeam(testing.allocator, chunk, i, .{});
+        defer m.deinit(testing.allocator);
+        try testing.expectEqual(3 * s.triCount(), m.vertexCount());
+        for (0..m.vertexCount()) |v| {
+            const r = m.rims[v * 2 ..][0..2];
+            if (v < 3 * @as(usize, s.n_quad_tris)) {
+                try testing.expectApproxEqAbs(0, @min(r[0], r[1]), 1e-4);
+            } else {
+                try testing.expectEqual(no_rim, r[0]);
+            }
+        }
+        quad_tris += s.n_quad_tris;
+    }
+    try testing.expect(quad_tris > 0);
 }
