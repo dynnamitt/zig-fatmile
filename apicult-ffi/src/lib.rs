@@ -1,15 +1,16 @@
 //! C ABI over apicult-desigual's on-demand chunk generator.
 //!
 //! `ac_chunk` builds chunk `(q, r)` of an unbounded world and returns it as
-//! HXCK v1 bytes, the format `src/core/Chunk.zig` reads (apicult wrote the
-//! same layout as files up to e59947):
+//! HXCK v2 bytes, the format `src/core/Chunk.zig` reads. v1 is what apicult
+//! wrote as files up to e59947; v2 drops its partition-line segments (the
+//! terrain shader draws the lines from the face fans) and keeps their header
+//! slot as 0:
 //!
 //! | part | layout (little-endian) |
 //! |---|---|
-//! | header (40 B) | `"HXCK"`, `u32 1`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 n_lines`, `u32 0`, `u64 hash` |
+//! | header (40 B) | `"HXCK"`, `u32 2`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 0`, `u32 0`, `u64 hash` |
 //! | cells | `n_cells × {i32 q, i32 r, f32 height, f32 radius, u32 first_tri, u8 n_quads, u8 n_junctions, u16 0}` |
-//! | tris | `n_tris × 9 f32`: per cell 6 face tris, then 2 per owned gap quad, then junction tris |
-//! | lines | `n_lines × 6 f32`: perimeter segments of the owned gap quads |
+//! | tris | `n_tris × 9 f32`: per cell 6 face tris (centre, rim corner, rim corner), then 2 per owned gap quad, then junction tris |
 //!
 //! `hash` is FNV-1a 64 over every byte after the header. The cells and tris
 //! are what [`apicult_desigual::NoiseWorld`] puts in a chunk's owned stream.
@@ -19,7 +20,7 @@ use glam::Vec3;
 use hexx::{Hex, shapes};
 
 const MAGIC: &[u8; 4] = b"HXCK";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 40;
 const CELL_LEN: usize = 24;
 /// Header offsets of the fields written after the cells are known.
@@ -54,7 +55,7 @@ pub const WORLD: World = World {
 ///
 /// @param world {World} — the world's settings, the same for every chunk.
 /// @param coord {Hex} — the chunk's coordinate on the chunk lattice.
-/// @returns {Vec<u8>} the chunk as HXCK v1 bytes (format in the module docs).
+/// @returns {Vec<u8>} the chunk as HXCK v2 bytes (format in the module docs).
 pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
     let settings = HGridSettings {
         nominal_hex_radius: world.hex_size,
@@ -65,7 +66,6 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
     };
     let layout = HGridLayout::for_chunk(&settings, coord, world.chunk_radius);
     let mut tris: Vec<[Vec3; 3]> = Vec::new();
-    let mut lines: Vec<[Vec3; 2]> = Vec::new();
     // Header with the cell count and hash still zero; both are patched below.
     let mut out: Vec<u8> = [
         MAGIC.as_slice(),
@@ -80,11 +80,6 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
         let first = tris.len();
         let (faces, quads, junctions) = layout.owned_tris_into(h, false, &mut tris);
         assert_eq!(faces, 6, "own cells always own their face fan");
-        // Owned gap quads follow the face tris as `[a,b,c], [a,c,d]` pairs.
-        for pair in tris[first + faces..][..quads].chunks_exact(2) {
-            let ([a, b, c], d) = (pair[0], pair[1][2]);
-            lines.extend([[a, b], [b, c], [c, d], [d, a]]);
-        }
         out.extend_from_slice(&h.x.to_le_bytes());
         out.extend_from_slice(&h.y.to_le_bytes());
         out.extend_from_slice(&cell.height.to_le_bytes());
@@ -93,13 +88,9 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
         out.extend_from_slice(&[(quads / 2) as u8, junctions as u8, 0, 0]);
     }
     let n_cells = (out.len() - HEADER_LEN) / CELL_LEN;
-    let counts = [n_cells, tris.len(), lines.len()].map(|n| (n as u32).to_le_bytes());
-    out[N_CELLS_AT..][..12].copy_from_slice(&counts.concat());
-    let floats = tris
-        .iter()
-        .flatten()
-        .chain(lines.iter().flatten())
-        .flat_map(|v| v.to_array());
+    let counts = [n_cells, tris.len()].map(|n| (n as u32).to_le_bytes());
+    out[N_CELLS_AT..][..8].copy_from_slice(&counts.concat());
+    let floats = tris.iter().flatten().flat_map(|v| v.to_array());
     out.extend(floats.flat_map(f32::to_le_bytes));
     let hash = fnv1a64(&out[HEADER_LEN..]);
     out[HASH_AT..][..8].copy_from_slice(&hash.to_le_bytes());
@@ -180,10 +171,10 @@ mod tests {
             let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
             assert_eq!(&b[0..4], MAGIC);
             assert_eq!(u32_at(N_CELLS_AT), 127); // 1 + 3·6·7 cells
-            assert!(u32_at(24) > 0);
+            assert_eq!(u32_at(24), 0); // v1's line count, unused
             assert_eq!(
                 b.len(),
-                HEADER_LEN + u32_at(16) * CELL_LEN + u32_at(20) * 36 + u32_at(24) * 24
+                HEADER_LEN + u32_at(16) * CELL_LEN + u32_at(20) * 36
             );
             assert_eq!(
                 u64::from_le_bytes(b[HASH_AT..HASH_AT + 8].try_into().unwrap()),
