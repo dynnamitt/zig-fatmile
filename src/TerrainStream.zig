@@ -32,7 +32,7 @@ pub fn init(gpa: std.mem.Allocator) !TerrainStream {
     return .{
         .gpa = gpa,
         .terrain = .init(gpa, core.world.chunk_radius, core.world.hex_size),
-        .material = try rl.loadMaterialDefault(),
+        .material = try terrain_render.loadMaterial(),
     };
 }
 

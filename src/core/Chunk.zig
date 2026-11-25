@@ -5,10 +5,9 @@
 //!
 //! | part | layout (little-endian) |
 //! |---|---|
-//! | header (40 B) | `"HXCK"`, `u32 version`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 n_lines`, `u32 0`, `u64 hash` |
+//! | header (40 B) | `"HXCK"`, `u32 version`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 0`, `u32 0`, `u64 hash` |
 //! | cells | `n_cells × Cell` (24 B) |
 //! | tris | `n_tris × Tri`: per cell 6 face tris, then 2 per gap quad, then junction tris |
-//! | lines | `n_lines × Line`: perimeter segments of the owned gap quads |
 //!
 //! `hash` is FNV-1a 64 over every byte after the header.
 const std = @import("std");
@@ -18,7 +17,8 @@ const Vec3 = @import("vec.zig").Vec3;
 const Chunk = @This();
 
 pub const magic = "HXCK";
-pub const version: u32 = 1;
+/// v2: v1 (apicult's old files) without the partition-line segments.
+pub const version: u32 = 2;
 pub const header_len = 40;
 
 /// One cell's record. Its triangles are `tris[first_tri..][0..triCount()]`.
@@ -43,12 +43,11 @@ pub const Cell = extern struct {
 };
 
 pub const Tri = extern struct { a: Vec3, b: Vec3, c: Vec3 };
-pub const Line = extern struct { a: Vec3, b: Vec3 };
 
 comptime {
     // The file is little-endian and read in place.
     std.debug.assert(builtin.cpu.arch.endian() == .little);
-    std.debug.assert(@sizeOf(Cell) == 24 and @sizeOf(Tri) == 36 and @sizeOf(Line) == 24);
+    std.debug.assert(@sizeOf(Cell) == 24 and @sizeOf(Tri) == 36);
 }
 
 coord: Hex,
@@ -56,7 +55,6 @@ coord: Hex,
 // no alignment promise. Every target we build for reads unaligned f32s.
 cells: []align(1) const Cell,
 tris: []align(1) const Tri,
-lines: []align(1) const Line,
 
 pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, HashMismatch, BadCellRun };
 
@@ -68,24 +66,20 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     if (readInt(u32, bytes, 4) != version) return error.UnsupportedVersion;
     const n_cells = readInt(u32, bytes, 16);
     const n_tris = readInt(u32, bytes, 20);
-    const n_lines = readInt(u32, bytes, 24);
     const hash = readInt(u64, bytes, 32);
 
     const payload = bytes[header_len..];
     const cells_len = @as(u64, n_cells) * @sizeOf(Cell);
     const tris_len = @as(u64, n_tris) * @sizeOf(Tri);
-    const lines_len = @as(u64, n_lines) * @sizeOf(Line);
-    if (payload.len != cells_len + tris_len + lines_len) return error.PayloadLength;
+    if (payload.len != cells_len + tris_len) return error.PayloadLength;
     if (std.hash.Fnv1a_64.hash(payload) != hash) return error.HashMismatch;
 
     // Checked above to fit in the payload, so these fit in usize (wasm32 too).
     const tris_at: usize = @intCast(header_len + cells_len);
-    const lines_at: usize = tris_at + @as(usize, @intCast(tris_len));
     const chunk: Chunk = .{
         .coord = .{ .q = readInt(i32, bytes, 8), .r = readInt(i32, bytes, 12) },
         .cells = std.mem.bytesAsSlice(Cell, bytes[header_len..tris_at]),
-        .tris = std.mem.bytesAsSlice(Tri, bytes[tris_at..lines_at]),
-        .lines = std.mem.bytesAsSlice(Line, bytes[lines_at..]),
+        .tris = std.mem.bytesAsSlice(Tri, bytes[tris_at..]),
     };
     // Cell runs must tile the tri buffer, so cellTris never reads past it.
     var next: u64 = 0;
@@ -119,7 +113,7 @@ test "parses a real chunk" {
     const chunk = try parse(bytes);
     try testing.expectEqual(test_data.chunk_coord, chunk.coord);
     try testing.expect(chunk.cells.len > 0);
-    try testing.expectEqual(bytes.len, header_len + chunk.cells.len * 24 + chunk.tris.len * 36 + chunk.lines.len * 24);
+    try testing.expectEqual(bytes.len, header_len + chunk.cells.len * 24 + chunk.tris.len * 36);
     var quads: usize = 0;
     for (chunk.cells) |cell| {
         quads += cell.n_quads;
@@ -131,8 +125,7 @@ test "parses a real chunk" {
         }
         try testing.expect(cell.radius > 0);
     }
-    // Each owned gap quad contributes its 4 perimeter segments.
-    try testing.expectEqual(4 * quads, chunk.lines.len);
+    try testing.expect(quads > 0);
 }
 
 test "rejects a flipped payload byte (hash mismatch)" {
@@ -149,7 +142,7 @@ test "rejects short, wrong-magic, wrong-version and wrong-length files" {
     copy[0] = 'X';
     try testing.expectError(error.BadMagic, parse(&copy));
     copy = bytes.*;
-    copy[4] = 2;
+    copy[4] = 3;
     try testing.expectError(error.UnsupportedVersion, parse(&copy));
 }
 

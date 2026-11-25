@@ -6,9 +6,8 @@ const terrain = @import("terrain.zig");
 const p = game.player;
 
 /// Near/far clip planes (m) at ground level. Near is raised from raylib's
-/// 0.01 so the depth buffer keeps the partition ribbons above the ground at a
-/// distance. Both grow with the camera's height (the debug lift), so the
-/// ground stays in view from above and the ribbons stay clear of it.
+/// 0.01 for depth precision at a distance. Both grow with the camera's
+/// height (the debug lift), so the ground stays in view from above.
 const near = 0.1;
 const far = 1000.0;
 const near_per_height = 0.001;

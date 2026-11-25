@@ -1,8 +1,7 @@
 //! A chunk's renderable triangles, as flat vertex arrays ready for a GPU
 //! upload: terrain tris with flat per-triangle normals and colour by height,
-//! plus each partition line as a thin ribbon of two triangles. Ribbons, not
-//! GL lines: WebGL ignores line width, and lines passing behind the camera
-//! got clipped away whole.
+//! and per vertex its distance to the cell's rim, from which the terrain
+//! shader paints the partition lines onto the surface itself.
 const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const Vec3 = @import("vec.zig").Vec3;
@@ -10,12 +9,12 @@ const palette = @import("palette.zig");
 const world = @import("world.zig");
 const ChunkMesh = @This();
 
+/// Rim distance on gap and junction tris: far past any line width.
+pub const no_rim = 1e3;
+
 pub const Style = struct {
     /// Height that maps to the top of the colour ramp.
     max_height: f32 = world.max_height,
-    /// Ribbon width and how far it floats above the edge, in metres.
-    line_width: f32 = 0.06,
-    line_lift: f32 = 0.04,
     /// Direction towards the sun; baked into vertex colours.
     sun: Vec3 = .{ .x = 0.4, .y = 1, .z = 0.25 },
     /// Light on faces turned away from the sun.
@@ -28,32 +27,38 @@ positions: []f32,
 normals: []f32,
 /// RGBA bytes per vertex.
 colors: []u8,
+/// 2 floats per vertex (a GPU texcoord): x is the distance in metres to the
+/// rim of the cell whose face this is, `no_rim` off the faces; y is 0.
+rims: []f32,
 
 pub fn vertexCount(m: ChunkMesh) usize {
     return m.positions.len / 3;
 }
 
 pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{OutOfMemory}!ChunkMesh {
-    const n_tris = chunk.tris.len + 2 * chunk.lines.len;
-    const positions = try allocator.alloc(f32, n_tris * 9);
+    const n = chunk.tris.len * 3;
+    const positions = try allocator.alloc(f32, n * 3);
     errdefer allocator.free(positions);
-    const normals = try allocator.alloc(f32, n_tris * 9);
+    const normals = try allocator.alloc(f32, n * 3);
     errdefer allocator.free(normals);
-    const colors = try allocator.alloc(u8, n_tris * 12);
-    const out: ChunkMesh = .{ .positions = positions, .normals = normals, .colors = colors };
+    const colors = try allocator.alloc(u8, n * 4);
+    errdefer allocator.free(colors);
+    const rims = try allocator.alloc(f32, n * 2);
+    const out: ChunkMesh = .{ .positions = positions, .normals = normals, .colors = colors, .rims = rims };
 
     const sun = style.sun.normalize();
     var w: Writer = .{ .mesh = out };
-    for (chunk.tris) |t| {
-        const up = upFacing(t);
-        const avg = (t.a.y + t.b.y + t.c.y) / 3;
-        const light = style.ambient + (1 - style.ambient) * @max(0, up.normal.dot(sun));
-        w.tri(up, palette.shade(palette.ground(avg / style.max_height), light));
+    for (chunk.cells) |cell| {
+        for (chunk.cellTris(cell), 0..) |t, i| {
+            const up = upFacing(t);
+            const avg = (t.a.y + t.b.y + t.c.y) / 3;
+            const light = style.ambient + (1 - style.ambient) * @max(0, up.normal.dot(sun));
+            // The first 6 are the face fan: `a` is the centre, `b`–`c` a rim edge.
+            const rim: [3]f32 = if (i < 6) .{ rimDistance(t), 0, 0 } else @splat(no_rim);
+            w.tri(up, palette.shade(palette.ground(avg / style.max_height), light), rim);
+        }
     }
-    for (chunk.lines) |l| {
-        for (ribbon(l, style.line_width, style.line_lift)) |t| w.tri(upFacing(t), palette.line);
-    }
-    std.debug.assert(w.n == n_tris);
+    std.debug.assert(w.n == chunk.tris.len);
     return out;
 }
 
@@ -61,42 +66,44 @@ pub fn deinit(m: ChunkMesh, allocator: std.mem.Allocator) void {
     allocator.free(m.positions);
     allocator.free(m.normals);
     allocator.free(m.colors);
+    allocator.free(m.rims);
+}
+
+/// Distance in the ground plane from `t.a` to the line through `t.b`, `t.c`.
+fn rimDistance(t: Chunk.Tri) f32 {
+    const ex = t.c.x - t.b.x;
+    const ez = t.c.z - t.b.z;
+    const len = @sqrt(ex * ex + ez * ez);
+    if (len == 0) return 0;
+    return @abs(ex * (t.a.z - t.b.z) - ez * (t.a.x - t.b.x)) / len;
 }
 
 /// A triangle wound counter-clockwise seen from above (GL's front face), and
 /// its unit normal, which then points up. The generator's tris don't all
-/// wind the same way, and the GPU culls triangles facing away.
-pub const UpTri = struct { tri: Chunk.Tri, normal: Vec3 };
+/// wind the same way, and the GPU culls triangles facing away. `swapped`
+/// says `b` and `c` changed places.
+pub const UpTri = struct { tri: Chunk.Tri, normal: Vec3, swapped: bool };
 
 pub fn upFacing(t: Chunk.Tri) UpTri {
     const n = t.b.sub(t.a).cross(t.c.sub(t.a));
-    if (n.y >= 0) return .{ .tri = t, .normal = n.normalize() };
-    return .{ .tri = .{ .a = t.a, .b = t.c, .c = t.b }, .normal = n.scale(-1).normalize() };
-}
-
-/// Line `l` as two triangles `width` wide, lying flat, `lift` above it.
-pub fn ribbon(l: Chunk.Line, width: f32, lift: f32) [2]Chunk.Tri {
-    const dir = Vec3.normalize(.{ .x = l.b.x - l.a.x, .y = 0, .z = l.b.z - l.a.z });
-    const side: Vec3 = .{ .x = -dir.z * width / 2, .y = lift, .z = dir.x * width / 2 };
-    const across: Vec3 = .{ .x = -side.x, .y = lift, .z = -side.z };
-    const a0 = l.a.add(side);
-    const a1 = l.a.add(across);
-    const b0 = l.b.add(side);
-    const b1 = l.b.add(across);
-    return .{ .{ .a = a0, .b = b0, .c = b1 }, .{ .a = a0, .b = b1, .c = a1 } };
+    if (n.y >= 0) return .{ .tri = t, .normal = n.normalize(), .swapped = false };
+    return .{ .tri = .{ .a = t.a, .b = t.c, .c = t.b }, .normal = n.scale(-1).normalize(), .swapped = true };
 }
 
 const Writer = struct {
     mesh: ChunkMesh,
     n: usize = 0,
 
-    fn tri(w: *Writer, up: UpTri, color: u32) void {
+    /// `rim` is per corner of the triangle as the generator wound it.
+    fn tri(w: *Writer, up: UpTri, color: u32, rim: [3]f32) void {
         const n = up.normal;
-        for ([_]Vec3{ up.tri.a, up.tri.b, up.tri.c }, 0..) |v, k| {
+        const rims: [3]f32 = if (up.swapped) .{ rim[0], rim[2], rim[1] } else rim;
+        for ([_]Vec3{ up.tri.a, up.tri.b, up.tri.c }, rims, 0..) |v, r, k| {
             const i = w.n * 3 + k;
             w.mesh.positions[i * 3 ..][0..3].* = .{ v.x, v.y, v.z };
             w.mesh.normals[i * 3 ..][0..3].* = .{ n.x, n.y, n.z };
             std.mem.writeInt(u32, w.mesh.colors[i * 4 ..][0..4], color, .big); // RGBA byte order
+            w.mesh.rims[i * 2 ..][0..2].* = .{ r, 0 };
         }
         w.n += 1;
     }
@@ -105,11 +112,11 @@ const Writer = struct {
 const testing = std.testing;
 const test_data = @import("test_data.zig");
 
-test "builds every terrain tri plus two per line, normals up and unit" {
+test "builds every terrain tri, normals up and unit" {
     const chunk = try Chunk.parse(test_data.chunk_bytes);
     const m = try build(testing.allocator, chunk, .{});
     defer m.deinit(testing.allocator);
-    try testing.expectEqual(3 * (chunk.tris.len + 2 * chunk.lines.len), m.vertexCount());
+    try testing.expectEqual(3 * chunk.tris.len, m.vertexCount());
     for (0..m.vertexCount() / 3) |t| {
         const p = m.positions[t * 9 ..][0..9];
         const a: Vec3 = .{ .x = p[0], .y = p[1], .z = p[2] };
@@ -121,10 +128,7 @@ test "builds every terrain tri plus two per line, normals up and unit" {
         try testing.expectApproxEqAbs(1, Vec3.length(.{ .x = n[0], .y = n[1], .z = n[2] }), 1e-5);
         try testing.expect(n[1] >= 0);
     }
-    // Terrain first, opaque; lines after it, black.
     try testing.expectEqual(0xFF, m.colors[3]);
-    const first_line = chunk.tris.len * 3 * 4;
-    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0xFF }, m.colors[first_line..][0..4]);
 }
 
 test "faces are flat-shaded at their cell's height colour" {
@@ -141,15 +145,19 @@ test "faces are flat-shaded at their cell's height colour" {
     try testing.expectEqual(1, m.normals[i * 3 + 1]);
 }
 
-test "ribbon: width across the line, lifted, both tris up-facing" {
-    const l: Chunk.Line = .{ .a = .{ .x = 0, .y = 1, .z = 0 }, .b = .{ .x = 2, .y = 1, .z = 0 } };
-    const tris = ribbon(l, 0.1, 0.05);
-    for (tris) |t| for ([_]Vec3{ t.a, t.b, t.c }) |v| {
-        try testing.expectApproxEqAbs(1.05, v.y, 1e-6);
-        try testing.expectApproxEqAbs(0.05, @abs(v.z), 1e-6);
-    };
-    try testing.expect(upFacing(tris[0]).normal.y > 0.99);
-    // A degenerate (zero-length) line gives a zero-area ribbon, not NaNs.
-    const dot = ribbon(.{ .a = l.a, .b = l.a }, 0.1, 0.05);
-    try testing.expect(!std.math.isNan(dot[0].a.x));
+test "rims: the face centre sits an apothem from the rim, corners on it, gaps off it" {
+    const chunk = try Chunk.parse(test_data.chunk_bytes);
+    const m = try build(testing.allocator, chunk, .{});
+    defer m.deinit(testing.allocator);
+    for (chunk.cells) |cell| {
+        const v = cell.first_tri * 3; // first vertex of the cell's first face tri
+        for (0..6) |t| {
+            const rim = m.rims[(v + t * 3) * 2 ..][0..6];
+            // The centre is `a`, which upFacing never moves.
+            try testing.expectApproxEqAbs(cell.radius * @sqrt(3.0) / 2, rim[0], 1e-4);
+            try testing.expectEqual(0, rim[2]);
+            try testing.expectEqual(0, rim[4]);
+        }
+        if (cell.triCount() > 6) try testing.expectEqual(no_rim, m.rims[(v + 18) * 2]);
+    }
 }
