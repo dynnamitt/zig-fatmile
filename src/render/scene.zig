@@ -5,10 +5,13 @@ const terrain = @import("terrain.zig");
 
 const p = game.player;
 
-/// Near/far clip planes (m). Near is raised from raylib's 0.01 so the depth
-/// buffer keeps the partition ribbons above the ground at a distance.
+/// Near/far clip planes (m) at ground level. Near is raised from raylib's
+/// 0.01 so the depth buffer keeps the partition ribbons above the ground at a
+/// distance. Both grow with the camera's height (the debug lift), so the
+/// ground stays in view from above and the ribbons stay clear of it.
 const near = 0.1;
 const far = 1000.0;
+const near_per_height = 0.001;
 const fovy = 70;
 
 /// Camera for a `game.player.View`.
@@ -23,13 +26,10 @@ pub fn camera(v: p.View) rl.Camera3D {
     };
 }
 
-/// One-time renderer setup, after the window opens.
-pub fn init() void {
-    rl.gl.rlSetClipPlanes(near, far);
-}
-
 /// Draws the world.
 pub fn draw(cam: rl.Camera3D, meshes: []const rl.Mesh, material: rl.Material) void {
+    const height = @max(0, cam.position.y);
+    rl.gl.rlSetClipPlanes(@max(near, height * near_per_height), far + height); // read by beginMode3D
     rl.beginMode3D(cam);
     defer rl.endMode3D();
     terrain.draw(meshes, material);

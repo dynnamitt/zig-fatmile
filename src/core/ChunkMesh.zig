@@ -7,11 +7,12 @@ const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const Vec3 = @import("vec.zig").Vec3;
 const palette = @import("palette.zig");
+const world = @import("world.zig");
 const ChunkMesh = @This();
 
 pub const Style = struct {
-    /// Height that maps to the top of the colour ramp (the manifest's max_height).
-    max_height: f32,
+    /// Height that maps to the top of the colour ramp.
+    max_height: f32 = world.max_height,
     /// Ribbon width and how far it floats above the edge, in metres.
     line_width: f32 = 0.06,
     line_lift: f32 = 0.04,
@@ -106,7 +107,7 @@ const test_data = @import("test_data.zig");
 
 test "builds every terrain tri plus two per line, normals up and unit" {
     const chunk = try Chunk.parse(test_data.chunk_bytes);
-    const m = try build(testing.allocator, chunk, .{ .max_height = 20 });
+    const m = try build(testing.allocator, chunk, .{});
     defer m.deinit(testing.allocator);
     try testing.expectEqual(3 * (chunk.tris.len + 2 * chunk.lines.len), m.vertexCount());
     for (0..m.vertexCount() / 3) |t| {
@@ -128,7 +129,7 @@ test "builds every terrain tri plus two per line, normals up and unit" {
 
 test "faces are flat-shaded at their cell's height colour" {
     const chunk = try Chunk.parse(test_data.chunk_bytes);
-    const style: Style = .{ .max_height = 20 };
+    const style: Style = .{};
     const m = try build(testing.allocator, chunk, style);
     defer m.deinit(testing.allocator);
     const cell = chunk.cells[0];

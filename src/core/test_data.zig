@@ -1,12 +1,8 @@
-//! Test fixtures from the checked-in world (`terrain/`), embedded via
-//! anonymous imports that build.zig adds to `core`. Tests only.
+//! Test fixture: chunk 0,0 of the world in `world.zig`, as apicult-ffi
+//! writes it, embedded via an anonymous import that build.zig adds to
+//! `core`. Tests only. apicult-ffi's `fixture_is_current` test fails when it
+//! goes stale; `UPDATE_FIXTURE=1 cargo test` (in `apicult-ffi/`) remakes it.
 const Hex = @import("Hex.zig");
 
-pub const chunk_bytes = @embedFile("terrain_chunk_0_0");
-pub const manifest_json = @embedFile("terrain_manifest");
-
-/// What `terrain/SOURCE` generated: `hex-chunks --radius 30 --chunk-radius 6`
-/// with its default hex radius 4. The manifest test checks these.
+pub const chunk_bytes = @embedFile("chunk_0_0");
 pub const chunk_coord: Hex = .zero;
-pub const chunk_radius: u32 = 6;
-pub const hex_size: f32 = 4;

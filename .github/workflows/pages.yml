@@ -28,6 +28,13 @@ jobs:
         with:
           version: 0.17.1
 
+      # apicult-ffi (the Rust chunk generator) is linked into the wasm. Pinned:
+      # how Rust's emscripten std handles exceptions changes between releases,
+      # and build.zig links with -fwasm-exceptions to match.
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: wasm32-unknown-emscripten
+
       # Cache the installed Emscripten SDK. Its location is the emsdk package
       # hash; which SDK version gets installed is pinned by raylib (via
       # raylib_zig), so key on both and nothing else in build.zig.zon.

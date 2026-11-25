@@ -72,9 +72,10 @@ pub fn asGround(t: *const Terrain) ground.Ground {
 
 const testing = std.testing;
 const test_data = @import("test_data.zig");
+const world = @import("world.zig");
 
 fn testTerrain() !Terrain {
-    var t: Terrain = .init(testing.allocator, test_data.chunk_radius, test_data.hex_size);
+    var t: Terrain = .init(testing.allocator, world.chunk_radius, world.hex_size);
     try t.insert(try Chunk.parse(test_data.chunk_bytes));
     return t;
 }

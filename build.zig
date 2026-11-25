@@ -6,6 +6,8 @@ const zflecs = @import("zflecs");
 // emscripten's default 64 KiB stack overflows in Debug web builds (zig + flecs
 // frames); release builds don't check, so an overflow there corrupts memory.
 const web_stack_size = "1048576";
+// Rust target of apicult-ffi on web; native builds for the host.
+const rust_web_triple = "wasm32-unknown-emscripten";
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -47,9 +49,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    // Test fixtures: a real chunk and the manifest (src/core/test_data.zig).
-    core_mod.addAnonymousImport("terrain_chunk_0_0", .{ .root_source_file = b.path("terrain/chunk_0_0.bin") });
-    core_mod.addAnonymousImport("terrain_manifest", .{ .root_source_file = b.path("terrain/manifest.json") });
+    // Test fixture: chunk 0,0 as apicult-ffi writes it (src/core/test_data.zig).
+    core_mod.addAnonymousImport("chunk_0_0", .{ .root_source_file = b.path("src/core/testdata/chunk_0_0.bin") });
 
     const game_mod = b.createModule(.{
         .root_source_file = b.path("src/game/game.zig"),
@@ -70,6 +71,14 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("zflecs", zflecs_dep.module("root"));
     exe_mod.addImport("core", core_mod);
     exe_mod.addImport("game", game_mod);
+    // raylib's "Activate EMSDK" step, which installs the SDK. Everything
+    // else that needs emsdk waits on this one: two activations would run
+    // `emsdk update/install` concurrently in the same directory.
+    const emsdk_activate: ?*std.Build.Step = if (is_web)
+        findStep(&raylib_dep.artifact("raylib").step, "Activate EMSDK") orelse return error.EmsdkActivateStepNotFound
+    else
+        null;
+    const apicult_lib = try addApicult(b, emsdk_activate);
     const config = b.addOptions();
     const threads = b.option(u8, "threads", "Flecs worker threads (native only)") orelse 0;
     if (is_web and threads > 0) return error.ThreadsNotOnWeb; // wasm threads need COOP/COEP, which Pages can't send
@@ -79,13 +88,16 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Build and launch the app (web: serve it with emrun)");
 
     if (is_web) {
-        try addWebBuild(b, exe_mod, raylib_dep, flecs_lib, optimize, run_step);
+        try addWebBuild(b, exe_mod, raylib_dep, emsdk_activate.?, flecs_lib, apicult_lib, optimize, run_step);
     } else {
+        exe_mod.addObjectFile(apicult_lib);
+        // Rust's std calls the _Unwind_* API even with panic=abort; this is
+        // Zig's bundled LLVM libunwind, linked statically on every target.
+        exe_mod.linkSystemLibrary("unwind", .{});
         const exe = b.addExecutable(.{ .name = "zig-fatmile", .root_module = exe_mod });
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
-        run_cmd.setCwd(b.path(".")); // the app reads terrain/ relative to the repo root
         run_cmd.step.dependOn(b.getInstallStep());
         run_cmd.addPassthruArgs();
         run_step.dependOn(&run_cmd.step);
@@ -106,7 +118,9 @@ fn addWebBuild(
     b: *std.Build,
     exe_mod: *std.Build.Module,
     raylib_dep: *std.Build.Dependency,
+    emsdk_activate: *std.Build.Step,
     flecs_lib: *std.Build.Step.Compile,
+    apicult_lib: std.Build.LazyPath,
     optimize: std.builtin.OptimizeMode,
     run_step: *std.Build.Step,
 ) !void {
@@ -115,11 +129,9 @@ fn addWebBuild(
     // zflecs knows nothing about emscripten: flecs.c needs the emscripten libc
     // headers (zig doesn't ship them) and the SDK must be installed first.
     // raylib's own build does the same for itself.
-    // Reuse raylib's "Activate EMSDK" step rather than creating a second one:
-    // two would run `emsdk update/install` concurrently in the same directory.
     const raylib_lib = raylib_dep.artifact("raylib");
     flecs_lib.root_module.addIncludePath(try emsdk.path(b, "upstream/emscripten/cache/sysroot/include"));
-    flecs_lib.step.dependOn(findStep(&raylib_lib.step, "Activate EMSDK") orelse return error.EmsdkActivateStepNotFound);
+    flecs_lib.step.dependOn(emsdk_activate);
 
     const app = b.addLibrary(.{ .name = "zig-fatmile", .root_module = exe_mod });
 
@@ -137,19 +149,42 @@ fn addWebBuild(
     });
     const emcc = try emccRun(emcc_step);
     if (builtin.os.tag == .windows) emcc.argv.items[0].lazy_path.lazy_path = try emsdk.path(b, "upstream/emscripten/emcc.bat");
-    // Pack terrain/ into emscripten's virtual filesystem as /terrain
-    // (index.data, fetched before main), so the app's file reads are the same
-    // as native. emccStep's preload_paths passes a bare string the cache
-    // can't see; a directory arg plus the manifest (whose hashes change with
-    // any chunk) as input reruns emcc when the world changes.
-    emcc.addArg("--preload-file");
-    emcc.addDirectoryArg2(b.path("terrain"), .{ .suffix = "@/terrain" });
-    emcc.addFileInput(b.path("terrain/manifest.json"));
+    // Rust's emscripten std is built with wasm exception handling, so the
+    // link must enable it too (raylib and flecs don't care either way).
+    emcc.addFileArg(apicult_lib);
+    emcc.addArg("-fwasm-exceptions");
     b.getInstallStep().dependOn(emcc_step);
 
     const emrun = try emsdk.emrunStep(b, b.graph.path(.install_prefix, "web/index.html"), &.{});
     emrun.dependOn(emcc_step);
     run_step.dependOn(emrun);
+}
+
+/// Builds apicult-ffi (the Rust chunk generator, `apicult-ffi/`) with cargo
+/// as a static library for the host, or, given emsdk's activation step, for
+/// wasm32-emscripten with emsdk's emcc, and returns a copy of the `.a`.
+/// cargo runs on every build in its own `apicult-ffi/target` (shared with
+/// `cargo test`), so its incremental rebuilds work; a no-op takes a moment.
+fn addApicult(b: *std.Build, emsdk_activate: ?*std.Build.Step) !std.Build.LazyPath {
+    const cargo = b.addSystemCommand(&.{ "cargo", "build", "-q", "--release", "--lib", "--locked", "--target-dir=apicult-ffi/target", "--manifest-path=apicult-ffi/Cargo.toml" });
+    cargo.has_side_effects = true; // cargo decides what is stale
+    const copy = b.addWriteFiles();
+    copy.step.dependOn(&cargo.step);
+    const activate = emsdk_activate orelse return copy.addCopyFile(b.path("apicult-ffi/target/release/libapicult_ffi.a"), "libapicult_ffi.a");
+
+    cargo.addArgs(&.{ "--target", rust_web_triple });
+    const emsdk = rlz.emsdk;
+    cargo.step.dependOn(activate);
+    cargo.addArg("--config");
+    cargo.addFileArg2(try emsdk.path(b, "upstream/emscripten/emcc"), .{
+        .prefix = "target." ++ rust_web_triple ++ ".linker='",
+        .suffix = "'",
+        .make_absolute = true,
+    });
+    // apicult-desigual is also a cdylib, which cargo links even as a
+    // dependency; that throwaway wasm has no main.
+    cargo.setEnvironmentVariable("CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS", "-C link-arg=--no-entry");
+    return copy.addCopyFile(b.path("apicult-ffi/target/" ++ rust_web_triple ++ "/release/libapicult_ffi.a"), "libapicult_ffi.a");
 }
 
 /// Depth-first search of `root`'s dependencies for a step named `name`.

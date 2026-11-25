@@ -1,8 +1,0 @@
-repo: https://github.com/dynnamitt/apicult-desigual-rs
-commit: e59947bac9356b6cdf706fdb4c9c933083677b0d
-args: --radius 30 --chunk-radius 6
-rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
-crates:
-  glam 0.30.10
-  hexx 0.24.0
-  noise 0.9.0
