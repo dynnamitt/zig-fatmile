@@ -128,10 +128,12 @@ fn frame() callconv(.c) void {
 /// (`game.player.reach` from the camera), or null.
 fn cellUnderPointer(cam: rl.Camera3D) ?core.Hex {
     const ray = rl.getScreenToWorldRay(rl.getMousePosition(), cam);
-    const origin: core.Vec3 = .{ .x = ray.position.x, .y = ray.position.y, .z = ray.position.z };
-    const dir: core.Vec3 = .{ .x = ray.direction.x, .y = ray.direction.y, .z = ray.direction.z };
-    const hit = stream.terrain.raycast(origin, dir, game.player.reach) orelse return null;
+    const hit = stream.terrain.raycast(vec3(ray.position), vec3(ray.direction), game.player.reach) orelse return null;
     return stream.terrain.faceAt(hit.x, hit.z);
+}
+
+fn vec3(v: rl.Vector3) core.Vec3 {
+    return .{ .x = v.x, .y = v.y, .z = v.z };
 }
 
 /// Mouse, touch, keyboard and gamepad 0 → the player's intent. Mouse look is

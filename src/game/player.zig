@@ -14,7 +14,7 @@ pub const walk_speed: f32 = 4.5; // m/s
 pub const max_climb: f32 = 1.0;
 pub const eye_height: f32 = 1.7; // m above the ground
 /// How far the shovel reaches from the eye, in hex sizes (`core.world.hex_size`).
-pub const reach_factor: f32 = 1.5;
+const reach_factor: f32 = 1.5;
 pub const reach: f32 = reach_factor * core.world.hex_size; // m
 /// Eye smoothing rate (1/s): how fast the eye follows the ground up and down
 /// between hexes. Higher is stiffer.

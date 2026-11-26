@@ -62,13 +62,18 @@ pub fn heightAt(t: *const Terrain, x: f32, z: f32) ?f32 {
     const h = Hex.fromWorld(x, z, t.hex_size);
     const nb = h.neighbors();
     for ([_]Hex{h} ++ nb) |owner| {
-        const loaded = t.chunks.getPtr(owner.toLowerRes(t.chunk_radius)) orelse continue;
-        const i = loaded.cells.get(owner) orelse continue;
-        for (loaded.chunk.cellTris(loaded.chunk.cells[i])) |tri| {
+        for (t.cellTris(owner) orelse continue) |tri| {
             if (ground.heightInTri(tri, x, z)) |y| return y;
         }
     }
     return null;
+}
+
+/// Triangles of loaded cell `h` (face first, `Chunk.face_tris`), or null.
+fn cellTris(t: *const Terrain, h: Hex) ?[]align(1) const Chunk.Tri {
+    const loaded = t.chunks.getPtr(h.toLowerRes(t.chunk_radius)) orelse return null;
+    const i = loaded.cells.get(h) orelse return null;
+    return loaded.chunk.cellTris(loaded.chunk.cells[i]);
 }
 
 /// Cell whose flat top (its face, not a gap or junction) covers world `x`,
@@ -77,9 +82,7 @@ pub fn heightAt(t: *const Terrain, x: f32, z: f32) ?f32 {
 pub fn faceAt(t: *const Terrain, x: f32, z: f32) ?Hex {
     // A face lies inside its own hex's hexagon, so only `h` can own it.
     const h = Hex.fromWorld(x, z, t.hex_size);
-    const loaded = t.chunks.getPtr(h.toLowerRes(t.chunk_radius)) orelse return null;
-    const i = loaded.cells.get(h) orelse return null;
-    const face = loaded.chunk.cellTris(loaded.chunk.cells[i])[0..Chunk.face_tris];
+    const face = (t.cellTris(h) orelse return null)[0..Chunk.face_tris];
     for (face) |tri| if (ground.heightInTri(tri, x, z) != null) return h;
     return null;
 }
@@ -90,29 +93,42 @@ pub fn faceAt(t: *const Terrain, x: f32, z: f32) ?Hex {
 pub fn raycast(t: *const Terrain, origin: Vec3, dir: Vec3, max_dist: f32) ?Vec3 {
     std.debug.assert(max_dist >= 0);
     const steps: usize = @intFromFloat(@ceil(max_dist / ray_step));
+    const ray: Ray = .{ .t = t, .origin = origin, .dir = dir };
     var prev: f32 = 0;
     for (0..steps + 1) |i| {
         const d = @min(@as(f32, @floatFromInt(i)) * ray_step, max_dist);
         defer prev = d;
-        if (!t.below(origin.add(dir.scale(d)))) continue;
-        if (i == 0) return origin;
-        // Ground between prev (above) and d (below): bisect.
+        if (!ray.belowAt(d)) continue;
+        // Ground between prev (above) and d (below; both 0 if the origin is
+        // under the ground): bisect.
         var lo = prev;
         var hi = d;
         for (0..ray_refine) |_| {
             const mid = (lo + hi) / 2;
-            if (t.below(origin.add(dir.scale(mid)))) hi = mid else lo = mid;
+            if (ray.belowAt(mid)) hi = mid else lo = mid;
         }
-        return origin.add(dir.scale(hi));
+        return ray.at(hi);
     }
     return null;
 }
 
-/// Whether `p` is at or under the ground (false off the loaded terrain).
-fn below(t: *const Terrain, p: Vec3) bool {
-    const y = t.heightAt(p.x, p.z) orelse return false;
-    return p.y <= y;
-}
+const Ray = struct {
+    t: *const Terrain,
+    origin: Vec3,
+    dir: Vec3,
+
+    fn at(r: Ray, d: f32) Vec3 {
+        return r.origin.add(r.dir.scale(d));
+    }
+
+    /// Whether the point `d` m along is at or under the ground (false off
+    /// the loaded terrain).
+    fn belowAt(r: Ray, d: f32) bool {
+        const p = r.at(d);
+        const y = r.t.heightAt(p.x, p.z) orelse return false;
+        return p.y <= y;
+    }
+};
 
 /// This terrain as the ground rule's height lookup. `t` must stay put.
 pub fn asGround(t: *const Terrain) ground.Ground {
@@ -218,13 +234,19 @@ test "faceAt: a face's own cell; null over a gap or off the terrain" {
     try testing.expectEqual(null, t.faceAt(1e4, 0));
 }
 
+const down = Vec3.up.scale(-1);
+
+/// Point `dy` m above cell `c`'s centre.
+fn above(t: Terrain, c: Chunk.Cell, dy: f32) Vec3 {
+    const w = c.hex().toWorld(t.hex_size);
+    return .{ .x = w[0], .y = c.height + dy, .z = w[1] };
+}
+
 test "raycast: straight down lands on the face, within reach only" {
     var t = try testTerrain();
     defer t.deinit();
-    const down: Vec3 = .{ .x = 0, .y = -1, .z = 0 };
     for (t.chunks.get(.zero).?.chunk.cells) |c| {
-        const w = c.hex().toWorld(t.hex_size);
-        const eye: Vec3 = .{ .x = w[0], .y = c.height + 1.7, .z = w[1] };
+        const eye = above(t, c, 1.7);
         const hit = t.raycast(eye, down, 5).?;
         try testing.expectApproxEqAbs(c.height, hit.y, 1e-3);
         try testing.expectEqual(c.hex(), t.faceAt(hit.x, hit.z).?);
@@ -242,9 +264,7 @@ test "raycast: a slanted ray stops on the ground surface" {
         // 20 m reaches about 3 cells on: stay that far inside the one loaded
         // chunk, or the ray stops against the side of its unloaded rim.
         if (c.hex().distance(.zero) + 3 > world.chunk_radius) continue;
-        const w = c.hex().toWorld(t.hex_size);
-        const eye: Vec3 = .{ .x = w[0], .y = c.height + 1.7, .z = w[1] };
-        const hit = t.raycast(eye, dir, 20) orelse continue;
+        const hit = t.raycast(above(t, c, 1.7), dir, 20) orelse continue;
         try testing.expectApproxEqAbs(t.heightAt(hit.x, hit.z).?, hit.y, 1e-3);
         hits += 1;
     }
@@ -254,10 +274,8 @@ test "raycast: a slanted ray stops on the ground surface" {
 test "raycast: an origin under the ground hits at once; unloaded ground isn't hit" {
     var t = try testTerrain();
     defer t.deinit();
-    const c = t.chunks.get(.zero).?.chunk.cells[0];
-    const w = c.hex().toWorld(t.hex_size);
-    const under: Vec3 = .{ .x = w[0], .y = c.height - 1, .z = w[1] };
+    const under = above(t, t.chunks.get(.zero).?.chunk.cells[0], -1);
     try testing.expectEqual(under, t.raycast(under, Vec3.up, 5).?);
     const far: Vec3 = .{ .x = 1e4, .y = 1, .z = 0 };
-    try testing.expectEqual(null, t.raycast(far, .{ .x = 0, .y = -1, .z = 0 }, 100));
+    try testing.expectEqual(null, t.raycast(far, down, 100));
 }
