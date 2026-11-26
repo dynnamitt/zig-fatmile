@@ -125,7 +125,8 @@ fn frame() callconv(.c) void {
 }
 
 /// The cell whose face is under the mouse pointer, within the shovel's reach
-/// (`game.player.reach` from the camera), or null.
+/// (`game.player.reach` from the camera, so the debug lift can put every
+/// cell out of reach), or null.
 fn cellUnderPointer(cam: rl.Camera3D) ?core.Hex {
     const ray = rl.getScreenToWorldRay(rl.getMousePosition(), cam);
     const hit = stream.terrain.raycast(vec3(ray.position), vec3(ray.direction), game.player.reach) orelse return null;

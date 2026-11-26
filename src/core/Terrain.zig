@@ -76,9 +76,11 @@ fn cellTris(t: *const Terrain, h: Hex) ?[]align(1) const Chunk.Tri {
     return loaded.chunk.cellTris(loaded.chunk.cells[i]);
 }
 
-/// Cell whose flat top (its face, not a gap or junction) covers world `x`,
-/// `z`, or null over a gap, a junction or unloaded ground. Its height is
-/// that cell's `height`.
+/// Cell whose flat top (its face, not a gap or junction) covers a world
+/// point. Its height is that cell's `height`.
+/// @param x {f32} world x, m.
+/// @param z {f32} world z, m.
+/// @returns {?Hex} the cell, or null over a gap, a junction or unloaded ground.
 pub fn faceAt(t: *const Terrain, x: f32, z: f32) ?Hex {
     // A face lies inside its own hex's hexagon, so only `h` can own it.
     const h = Hex.fromWorld(x, z, t.hex_size);
@@ -87,11 +89,14 @@ pub fn faceAt(t: *const Terrain, x: f32, z: f32) ?Hex {
     return null;
 }
 
-/// First point where the ray from `origin` along `dir` (unit length) meets
-/// the ground within `max_dist` metres, or null. Unloaded ground isn't hit.
+/// First point where a ray meets the ground. Unloaded ground isn't hit.
 /// Samples every `ray_step` m, so a ridge thinner than that can be missed.
+/// @param origin {Vec3} where the ray starts.
+/// @param dir {Vec3} its direction, unit length.
+/// @param max_dist {f32} how far to look, m: finite, at least 0.
+/// @returns {?Vec3} the hit point, or null within `max_dist`.
 pub fn raycast(t: *const Terrain, origin: Vec3, dir: Vec3, max_dist: f32) ?Vec3 {
-    std.debug.assert(max_dist >= 0);
+    std.debug.assert(max_dist >= 0 and std.math.isFinite(max_dist));
     const steps: usize = @intFromFloat(@ceil(max_dist / ray_step));
     const ray: Ray = .{ .t = t, .origin = origin, .dir = dir };
     var prev: f32 = 0;
