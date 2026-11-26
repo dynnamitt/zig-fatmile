@@ -11,6 +11,7 @@ const game = @import("game");
 const config = @import("config");
 const hud = @import("render/hud.zig");
 const scene = @import("render/scene.zig");
+const Sky = @import("render/Sky.zig");
 const TerrainStream = @import("TerrainStream.zig");
 
 // Starting size. The window is resizable on both platforms: natively you
@@ -40,6 +41,7 @@ pub const os = if (builtin.os.tag == .emscripten) @import("platform/emscripten.z
 var world: *ecs.world_t = undefined;
 var player: ecs.entity_t = undefined;
 var stream: TerrainStream = undefined;
+var sky: Sky = undefined;
 var ground: core.ground.Ground = undefined;
 var clock: core.FixedClock = .{};
 /// Walk forward without holding anything: R toggles it (web: the page's
@@ -57,6 +59,8 @@ pub fn main() !void {
     rl.initWindow(width, height, "zig-fatmile");
     defer rl.closeWindow();
 
+    sky = try .load();
+    defer sky.unload();
     stream = try .init(std.heap.c_allocator);
     defer stream.deinit();
     ground = stream.terrain.asGround();
@@ -96,10 +100,10 @@ fn frame() callconv(.c) void {
 
     rl.beginDrawing();
     defer rl.endDrawing();
-    rl.clearBackground(rl.getColor(core.palette.background));
+    rl.clearBackground(rl.getColor(core.palette.background)); // the sky covers it
     var view = game.player.view(world, player, clock.alpha());
     view.eye.y += lift;
-    const draws = scene.draw(scene.camera(view), stream.pieces.items, stream.material);
+    const draws = scene.draw(scene.camera(view), sky, stream.pieces.items, stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't

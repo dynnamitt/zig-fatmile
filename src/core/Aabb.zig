@@ -31,6 +31,14 @@ pub fn join(a: Aabb, b: Aabb) Aabb {
     return a.include(b.min).include(b.max);
 }
 
+/// Horizontal (x, z) distance from point `x`, `z` to the box; 0 above or
+/// below it.
+pub fn distanceXz(b: Aabb, x: f32, z: f32) f32 {
+    const dx = @max(b.min.x - x, 0, x - b.max.x);
+    const dz = @max(b.min.z - z, 0, z - b.max.z);
+    return @sqrt(dx * dx + dz * dz);
+}
+
 /// The box round `positions`, 3 floats per point.
 /// @param positions {[]const f32} x, y, z per point; `empty` if none.
 /// @returns {Aabb} the bounds.
@@ -50,6 +58,13 @@ test "empty grows to its points" {
     try testing.expectEqual(Vec3{ .x = -1, .y = 2, .z = 0 }, b.min);
     try testing.expectEqual(Vec3{ .x = 1, .y = 5, .z = 3 }, b.max);
     try testing.expect(ofPositions(&.{}).isEmpty());
+}
+
+test "distanceXz: zero over the box, straight or diagonal outside it" {
+    const b = ofPositions(&.{ 0, 0, 0, 2, 5, 2 });
+    try testing.expectEqual(0, b.distanceXz(1, 1));
+    try testing.expectEqual(3, b.distanceXz(5, 1));
+    try testing.expectEqual(5, b.distanceXz(-3, -4));
 }
 
 test "join holds both, and empty joins to the other" {

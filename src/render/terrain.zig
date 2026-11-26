@@ -1,12 +1,14 @@
 //! Chunk meshes on the GPU: per chunk its own mesh, uploaded once, and one
-//! mesh of the seams it draws; frustum culling; and the terrain shader. The shader draws the baked vertex colours and paints
-//! the partition lines along all four edges of every gap quad, inside it,
-//! from the per-vertex edge distances in `core.ChunkMesh.rims` and
-//! `.bridges`: on the surface, so they can't float above the ground, and the
-//! faces stay clean.
+//! mesh of the seams it draws; frustum culling; and the terrain shader. The
+//! shader draws the baked vertex colours and paints the partition lines
+//! along all four edges of every gap quad, inside it, from the per-vertex
+//! edge distances in `core.ChunkMesh.rims` and `.bridges`: on the surface,
+//! so they can't float above the ground, and the faces stay clean. Then it
+//! fades everything into the horizon haze by distance (`core.sky.fog`).
 const std = @import("std");
 const rl = @import("raylib");
 const core = @import("core");
+const glsl = @import("glsl.zig");
 
 /// Line width in metres, measured into the gap quad from its edges. Far away
 /// the shader widens it to `min_line_px` pixels, so distant lines don't break
@@ -19,43 +21,28 @@ const min_line_px: f32 = 1.0;
 const line_blend_from: f32 = 0.2;
 const line_blend_to: f32 = 0.8;
 
-// One shader body for every backend; the header adapts it to the GLSL that
-// raylib's graphics API (rlGetVersion) speaks. The same code on web and
-// native: the API decides, not the build target.
-const Headers = struct { vs: []const u8, fs: []const u8 };
-const glsl_330: Headers = .{
-    .vs = "#version 330\n#define IN in\n#define OUT out\n",
-    .fs = "#version 330\n#define IN in\nout vec4 fragOut;\n#define FRAG_COLOR fragOut\n",
-};
-const glsl_120: Headers = .{
-    .vs = "#version 120\n#define IN attribute\n#define OUT varying\n",
-    .fs = "#version 120\n#define IN varying\n#define FRAG_COLOR gl_FragColor\n",
-};
-// fwidth needs OES_standard_derivatives on GLES 2 (WebGL 1 has it everywhere).
-const glsl_100: Headers = .{
-    .vs = "#version 100\n#define IN attribute\n#define OUT varying\n",
-    .fs = "#version 100\n#extension GL_OES_standard_derivatives : enable\nprecision mediump float;\n#define IN varying\n#define FRAG_COLOR gl_FragColor\n",
-};
-const glsl_300es: Headers = .{
-    .vs = "#version 300 es\n#define IN in\n#define OUT out\n",
-    .fs = "#version 300 es\nprecision mediump float;\n#define IN in\nout vec4 fragOut;\n#define FRAG_COLOR fragOut\n",
-};
-
 const vs_body =
     \\IN vec3 vertexPosition;
     \\IN vec2 vertexTexCoord;
     \\IN vec2 vertexTexCoord2;
     \\IN vec4 vertexColor;
     \\uniform mat4 mvp;
+    \\uniform vec3 viewPos;
+    \\uniform float fogStart;
+    \\uniform float fogEnd;
     \\OUT vec4 color;
     \\OUT vec2 rims;
     \\OUT vec2 bridges;
     \\OUT float height;
+    \\OUT float fog;
     \\void main() {
     \\    color = vertexColor;
     \\    rims = vertexTexCoord;
     \\    bridges = vertexTexCoord2;
     \\    height = vertexPosition.y;
+    \\    // core.sky.fog, per vertex: world positions need the vertex
+    \\    // shader's full precision (fragments may be mediump).
+    \\    fog = smoothstep(fogStart, fogEnd, length(vertexPosition.xz - viewPos.xz));
     \\    gl_Position = mvp * vec4(vertexPosition, 1.0);
     \\}
 ;
@@ -64,6 +51,8 @@ const fs_body =
     \\IN vec2 rims;
     \\IN vec2 bridges;
     \\IN float height;
+    \\IN float fog;
+    \\uniform vec4 fogColor;
     \\uniform float lineWidth;
     \\uniform float minLinePx;
     \\uniform vec4 lineColor;
@@ -76,7 +65,8 @@ const fs_body =
     \\    float width = max(lineWidth, px * minLinePx);
     \\    float up = smoothstep(lineBlendFrom, lineBlendTo, height);
     \\    vec4 line = mix(lineColor, lineColorHigh, up);
-    \\    FRAG_COLOR = mix(line, color, smoothstep(width - px, width, d));
+    \\    vec4 lit = mix(line, color, smoothstep(width - px, width, d));
+    \\    FRAG_COLOR = vec4(mix(lit.rgb, fogColor.rgb, fog), 1.0);
     \\}
 ;
 
@@ -100,37 +90,29 @@ pub fn upload(m: core.ChunkMesh) rl.Mesh {
 
 /// The terrain material: raylib's default with the terrain shader. Call
 /// after the window opens; `rl.unloadMaterial` frees the shader too.
-/// @returns {rl.Material} the material; error.NoShaders on raylib's GL 1.1
-/// and software backends, error.LoadShader if the shader doesn't compile.
+/// @returns {rl.Material} the material; see `glsl.load` for its errors.
 pub fn loadMaterial() !rl.Material {
-    const shader = try switch (@as(rl.gl.rlGlVersion, @fromBackingInt(@intCast(rl.gl.rlGetVersion())))) {
-        .rl_opengl_33, .rl_opengl_43 => load(glsl_330),
-        .rl_opengl_21 => load(glsl_120),
-        .rl_opengl_es_20 => load(glsl_100),
-        .rl_opengl_es_30 => load(glsl_300es),
-        .rl_opengl_11, .rl_opengl_software => error.NoShaders,
-    };
+    const shader = try glsl.load(vs_body, fs_body);
     errdefer rl.unloadShader(shader);
-
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineWidth"), &line_width, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "minLinePx"), &min_line_px, .float);
-    const line_color = rl.colorNormalize(rl.getColor(core.palette.line));
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColor"), &line_color, .vec4);
-    const line_color_high = rl.colorNormalize(rl.getColor(core.palette.line_high));
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColorHigh"), &line_color_high, .vec4);
-    const blend_from = line_blend_from * core.world.max_height;
-    const blend_to = line_blend_to * core.world.max_height;
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendFrom"), &blend_from, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendTo"), &blend_to, .float);
+    // raylib's slot for a camera-position uniform. raylib doesn't fill it;
+    // it keeps the location, so `draw` needn't look it up every frame.
+    shader.locs[view_pos_slot] = rl.getShaderLocation(shader, "viewPos");
+    glsl.setFloat(shader, "fogStart", core.sky.fog_start);
+    glsl.setFloat(shader, "fogEnd", core.sky.fog_end);
+    glsl.setColor(shader, "fogColor", core.palette.sky_horizon);
+    glsl.setFloat(shader, "lineWidth", line_width);
+    glsl.setFloat(shader, "minLinePx", min_line_px);
+    glsl.setColor(shader, "lineColor", core.palette.line);
+    glsl.setColor(shader, "lineColorHigh", core.palette.line_high);
+    glsl.setFloat(shader, "lineBlendFrom", line_blend_from * core.world.max_height);
+    glsl.setFloat(shader, "lineBlendTo", line_blend_to * core.world.max_height);
 
     var material = try rl.loadMaterialDefault();
     material.shader = shader;
     return material;
 }
 
-fn load(comptime h: Headers) !rl.Shader {
-    return rl.loadShaderFromMemory(h.vs ++ vs_body, h.fs ++ fs_body);
-}
+const view_pos_slot = @backingInt(rl.ShaderLocationIndex.vector_view);
 
 /// One chunk to draw: its own mesh and the seams it draws, culled together.
 pub const Piece = struct {
@@ -140,11 +122,8 @@ pub const Piece = struct {
     seams: ?rl.Mesh,
 };
 
-/// The current camera's frustum, from rlgl's matrices: call between
-/// `beginMode3D` and `endMode3D`.
-pub fn viewFrustum() core.Frustum {
-    // raymath's multiply(a, b) is b·a as maths, so this is projection·view.
-    const m = rl.gl.rlGetMatrixModelview().multiply(rl.gl.rlGetMatrixProjection());
+/// The frustum of view-projection matrix `m` (from `glsl.viewProj`).
+pub fn frustumOf(m: rl.Matrix) core.Frustum {
     return .fromMatrix(.{
         .{ m.m0, m.m4, m.m8, m.m12 },
         .{ m.m1, m.m5, m.m9, m.m13 },
@@ -153,13 +132,15 @@ pub fn viewFrustum() core.Frustum {
     });
 }
 
-/// Draws the `pieces` that touch `frustum` (vertex colours, world-space
-/// vertices) with `material`.
+/// Draws the `pieces` in view from `eye` (vertex colours, world-space
+/// vertices) with `material`: those that touch `frustum` and that the fog
+/// doesn't wholly hide (`core.sky.hiddenByFog`).
 /// @returns {usize} how many meshes were drawn.
-pub fn draw(pieces: []const Piece, frustum: core.Frustum, material: rl.Material) usize {
+pub fn draw(pieces: []const Piece, frustum: core.Frustum, eye: core.Vec3, material: rl.Material) usize {
+    rl.setShaderValue(material.shader, material.shader.locs[view_pos_slot], &eye, .vec3); // for the fog
     var n: usize = 0;
     for (pieces) |p| {
-        if (!frustum.touches(p.bounds)) continue;
+        if (!frustum.touches(p.bounds) or core.sky.hiddenByFog(p.bounds, eye)) continue;
         rl.drawMesh(p.own, material, rl.Matrix.identity());
         n += 1;
         if (p.seams) |m| {

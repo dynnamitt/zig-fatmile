@@ -12,6 +12,19 @@ pub const line: u32 = 0x071816FF; // near-black teal
 /// Partition lines on the ridges; the terrain shader blends from `line` by height.
 pub const line_high: u32 = 0x7A3A1EFF; // deep copper
 
+/// Sky straight up: deep dusk teal.
+pub const sky_zenith: u32 = 0x173A48FF;
+/// Sky halfway up the gradient: dusty mauve, so the haze doesn't turn grey
+/// on its way to teal (the two are near complements).
+pub const sky_mid: u32 = 0x8C7480FF;
+/// Sky at the horizon: dusty peach haze. Distant terrain fades into it
+/// (`sky.fog`), so it is also the fog colour.
+pub const sky_horizon: u32 = 0xD9AB80FF;
+/// The sun's disc and glow.
+pub const sun: u32 = 0xFFF0D2FF; // warm white
+/// The moon's crescent: decoration, it lights nothing.
+pub const moon: u32 = 0xA8D8CEFF; // pale teal
+
 /// Ground colour by height, low to high: teal hollows, sand slopes, pale crests.
 pub const ground_stops = [_]u32{ 0x1E4A48FF, teal, sand, 0xE8DCB8FF };
 

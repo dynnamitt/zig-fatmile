@@ -14,6 +14,23 @@ pub const Range = struct {
     keep: u32,
 };
 
+/// The game's range: 19 chunks round the player's own, freed past 3 steps.
+pub const chunk_range: Range = .{ .load = 2, .keep = 3 };
+/// Metres loaded in every direction from anywhere in the player's chunk,
+/// once `chunk_range` has loaded (1 step would give 45 m). A fine sweep
+/// put the worst case, from a jagged chunk corner, at 118.5 m; this keeps a
+/// margin for what the test's sampling can miss. `sky.fog_end` must stay
+/// within it.
+pub const min_loaded_radius: f32 = 112;
+
+/// Chunks a step into a neighbouring chunk brings into `range.load`: the
+/// far side of the new range. Loading this many per frame keeps the whole
+/// range loaded through every border crossing, so `min_loaded_radius` holds
+/// while walking, not just once loading settles.
+pub fn crossingLoads(range: Range) usize {
+    return 2 * @as(usize, range.load) + 1;
+}
+
 pub const Plan = struct {
     /// Load these, in order (nearest first).
     load: []const Hex,
@@ -113,4 +130,37 @@ test "a walk across the world: player's chunk always loaded, budget kept" {
         try testing.expect(loaded.items.len <= Hex.rangeCount(r.keep));
     }
     try testing.expect(frees > 0);
+}
+
+test "min_loaded_radius is loaded all round, from anywhere in the chunk" {
+    const world = @import("world.zig");
+    // Sample chunk 0,0 (within its bounding box) and look out every 2°.
+    const corner = Hex.toWorld(.{ .q = @intCast(world.chunk_radius + 2), .r = 0 }, world.hex_size);
+    const reach = @abs(corner[0]) + @abs(corner[1]);
+    const step = world.hex_size / 2;
+    const dirs = 180;
+    var x: f32 = -reach;
+    while (x <= reach) : (x += step) {
+        var z: f32 = -reach;
+        while (z <= reach) : (z += step) {
+            const here = Hex.fromWorld(x, z, world.hex_size).toLowerRes(world.chunk_radius);
+            if (!here.eql(Hex.zero)) continue;
+            for (0..dirs) |i| {
+                const a = std.math.tau * @as(f32, @floatFromInt(i)) / dirs;
+                const there = Hex.fromWorld(x + min_loaded_radius * @cos(a), z + min_loaded_radius * @sin(a), world.hex_size).toLowerRes(world.chunk_radius);
+                try std.testing.expect(Hex.distance(here, there) <= chunk_range.load);
+            }
+        }
+    }
+}
+
+test "crossingLoads: what one step into a neighbour leaves to load" {
+    for ([_]Range{ .{ .load = 1, .keep = 2 }, chunk_range }) |r| {
+        var buf: [Hex.rangeCount(4)]Hex = undefined;
+        const before = Hex.spiral(.zero, r.load, &buf);
+        var load_buf: [Hex.rangeCount(4)]Hex = undefined;
+        var unload_buf: [Hex.rangeCount(4)]Hex = undefined;
+        const p = plan(r, Hex.directions[0], Disc{ .radius = 100 }, before, std.math.maxInt(usize), &load_buf, unload_buf[0..before.len]);
+        try testing.expectEqual(crossingLoads(r), p.load.len);
+    }
 }
