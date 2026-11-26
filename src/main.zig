@@ -12,6 +12,7 @@ const config = @import("config");
 const hud = @import("render/hud.zig");
 const scene = @import("render/scene.zig");
 const Sky = @import("render/Sky.zig");
+const Shovel = @import("render/Shovel.zig");
 const TerrainStream = @import("TerrainStream.zig");
 
 // Starting size. The window is resizable on both platforms: natively you
@@ -42,6 +43,7 @@ var world: *ecs.world_t = undefined;
 var player: ecs.entity_t = undefined;
 var stream: TerrainStream = undefined;
 var sky: Sky = undefined;
+var shovel: Shovel = undefined;
 var ground: core.ground.Ground = undefined;
 var clock: core.FixedClock = .{};
 /// Walk forward without holding anything: R toggles it (web: the page's
@@ -58,10 +60,11 @@ pub fn main() !void {
     rl.setConfigFlags(.{ .window_resizable = true });
     rl.initWindow(width, height, "zig-fatmile");
     defer rl.closeWindow();
-    rl.hideCursor(); // hud.drawShovel is the pointer
 
     sky = try .load();
     defer sky.unload();
+    shovel = try .load();
+    defer shovel.unload();
     stream = try .init(std.heap.c_allocator);
     defer stream.deinit();
     ground = stream.terrain.asGround();
@@ -116,7 +119,7 @@ fn frame() callconv(.c) void {
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
     hud.drawStats(stats, stream.loaded.len, draws, auto_walk, lift);
     hud.drawHint();
-    hud.drawShovel();
+    shovel.draw();
 }
 
 /// Mouse, touch, keyboard and gamepad 0 → the player's intent. Mouse look is
