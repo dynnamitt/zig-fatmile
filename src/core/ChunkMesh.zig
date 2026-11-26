@@ -6,6 +6,7 @@
 const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const Vec3 = @import("vec.zig").Vec3;
+const Aabb = @import("Aabb.zig");
 const palette = @import("palette.zig");
 const world = @import("world.zig");
 const ChunkMesh = @This();
@@ -42,7 +43,16 @@ pub fn vertexCount(m: ChunkMesh) usize {
     return m.positions.len / 3;
 }
 
+/// The box round every vertex, for frustum culling.
+/// @returns {Aabb} the bounds; `Aabb.empty` for a mesh with no vertices.
+pub fn bounds(m: ChunkMesh) Aabb {
+    return .ofPositions(m.positions);
+}
+
 /// The mesh of `chunk`'s own triangles.
+/// @param chunk {Chunk} the parsed chunk.
+/// @param style {Style} colours and light.
+/// @returns {ChunkMesh} every tri of `chunk.tris`; free with `deinit`.
 pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{OutOfMemory}!ChunkMesh {
     var w: Writer = try .init(allocator, chunk.tris.len, style);
     for (chunk.cells) |cell| w.run(chunk.cellTris(cell), Chunk.face_tris, 2 * @as(usize, cell.n_quads));
@@ -50,12 +60,30 @@ pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{Out
     return w.mesh;
 }
 
-/// The mesh of `chunk`'s seam `i`: gap quads and junctions only, no faces.
-pub fn buildSeam(allocator: std.mem.Allocator, chunk: Chunk, i: usize, style: Style) error{OutOfMemory}!ChunkMesh {
-    const tris = chunk.seamTris(i);
-    var w: Writer = try .init(allocator, tris.len, style);
-    w.run(tris, 0, chunk.seams[i].n_quad_tris);
+/// One mesh of the seams in `mask`, back to back: gap quads and junctions
+/// only, no faces. Rebuild it when the mask changes (a neighbour loads or
+/// unloads), rather than keeping a mesh per seam.
+/// @param chunk {Chunk} the carrier, whose seams these are.
+/// @param mask {Chunk.SeamMask} bit `i` takes `chunk.seams[i]`, e.g. from `Chunk.drawnSeams`.
+/// @param style {Style} colours and light.
+/// @returns {ChunkMesh} the seams' tris, none if `mask` is 0; free with `deinit`.
+pub fn buildSeams(allocator: std.mem.Allocator, chunk: Chunk, mask: Chunk.SeamMask, style: Style) error{OutOfMemory}!ChunkMesh {
+    var n: usize = 0;
+    var it = chunk.seamIterator();
+    while (it.next()) |item| {
+        if (inMask(mask, item.index)) n += item.tris.len;
+    }
+    var w: Writer = try .init(allocator, n, style);
+    it = chunk.seamIterator();
+    while (it.next()) |item| {
+        if (inMask(mask, item.index)) w.run(item.tris, 0, item.seam.n_quad_tris);
+    }
+    std.debug.assert(w.n == n);
     return w.mesh;
+}
+
+fn inMask(mask: Chunk.SeamMask, i: usize) bool {
+    return mask & (@as(Chunk.SeamMask, 1) << @intCast(i)) != 0;
 }
 
 pub fn deinit(m: ChunkMesh, allocator: std.mem.Allocator) void {
@@ -207,11 +235,13 @@ test "rims: lines only in gap quads, each vertex on one of the quad's rims" {
     if (j.n_junctions > 0) try testing.expectEqual(no_rim, m.rims[(j.first_tri + j.triCount() - 1) * 3 * 2]);
 }
 
-test "seam meshes: every seam tri, lines in its quads, none in its junctions" {
+test "seam mesh: the masked seams' tris, lines in their quads, none in their junctions" {
     const chunk = try Chunk.parse(test_data.chunk_bytes);
     var quad_tris: usize = 0;
-    for (chunk.seams, 0..) |s, i| {
-        const m = try buildSeam(testing.allocator, chunk, i, .{});
+    var it = chunk.seamIterator();
+    while (it.next()) |item| {
+        const s = item.seam;
+        const m = try buildSeams(testing.allocator, chunk, @as(Chunk.SeamMask, 1) << @intCast(item.index), .{});
         defer m.deinit(testing.allocator);
         try testing.expectEqual(3 * s.triCount(), m.vertexCount());
         for (0..m.vertexCount()) |v| {
@@ -225,4 +255,30 @@ test "seam meshes: every seam tri, lines in its quads, none in its junctions" {
         quad_tris += s.n_quad_tris;
     }
     try testing.expect(quad_tris > 0);
+
+    const all = try buildSeams(testing.allocator, chunk, ~@as(Chunk.SeamMask, 0), .{});
+    defer all.deinit(testing.allocator);
+    try testing.expectEqual(3 * chunk.seam_tris.len, all.vertexCount());
+    const none = try buildSeams(testing.allocator, chunk, 0, .{});
+    defer none.deinit(testing.allocator);
+    try testing.expectEqual(0, none.vertexCount());
+    try testing.expect(none.bounds().isEmpty());
+}
+
+test "bounds hold the chunk, from the ground to its highest cell" {
+    const chunk = try Chunk.parse(test_data.chunk_bytes);
+    const m = try build(testing.allocator, chunk, .{});
+    defer m.deinit(testing.allocator);
+    const b = m.bounds();
+    for (chunk.cells) |cell| {
+        try testing.expect(cell.height >= b.min.y and cell.height <= b.max.y);
+    }
+    try testing.expect(b.max.x - b.min.x > 0 and b.max.z - b.min.z > 0);
+}
+
+test "partition lines stand out from the darkest ground" {
+    // The lowest ground colour, turned fully from the sun.
+    const style: Style = .{};
+    const darkest = palette.shade(palette.ground(0), style.ambient);
+    try testing.expect(palette.luma(palette.line) * 1.5 < palette.luma(darkest));
 }

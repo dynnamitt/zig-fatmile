@@ -99,7 +99,7 @@ fn frame() callconv(.c) void {
     rl.clearBackground(rl.getColor(core.palette.background));
     var view = game.player.view(world, player, clock.alpha());
     view.eye.y += lift;
-    scene.draw(scene.camera(view), stream.meshes(), stream.material);
+    const draws = scene.draw(scene.camera(view), stream.pieces.items, stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't
@@ -109,7 +109,7 @@ fn frame() callconv(.c) void {
     // the mean, not one frame.
     rl.gl.rlDrawRenderBatchActive();
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
-    hud.drawStats(stats, stream.loaded.len, auto_walk, lift);
+    hud.drawStats(stats, stream.loaded.len, draws, auto_walk, lift);
     hud.drawHint();
 }
 

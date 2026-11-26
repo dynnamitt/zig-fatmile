@@ -6,8 +6,9 @@ pub const background: u32 = 0x0E1414FF; // near-black teal
 pub const teal: u32 = 0x2E7E7EFF;
 pub const sand: u32 = 0xC8A878FF;
 
-/// Partition lines between hexes.
-pub const line: u32 = 0x1E4A48FF; // deep teal, the ground ramp's bottom
+/// Partition lines between hexes; darker than the lowest, shaded ground
+/// (`ground_stops[0]`), so lines show in the hollows too.
+pub const line: u32 = 0x071816FF; // near-black teal
 /// Partition lines on the ridges; the terrain shader blends from `line` by height.
 pub const line_high: u32 = 0x7A3A1EFF; // deep copper
 
@@ -34,6 +35,14 @@ pub fn lerp(a: u32, b: u32, t: f32) u32 {
     return out;
 }
 
+/// Relative luminance of `c`'s RGB (Rec. 709 weights, no gamma), 0..255.
+pub fn luma(c: u32) f32 {
+    const r: f32 = @floatFromInt((c >> 24) & 0xFF);
+    const g: f32 = @floatFromInt((c >> 16) & 0xFF);
+    const b: f32 = @floatFromInt((c >> 8) & 0xFF);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 /// `c` with its RGB scaled by `k` (0..1); alpha kept.
 pub fn shade(c: u32, k: f32) u32 {
     const kk = std.math.clamp(k, 0, 1);
@@ -54,6 +63,12 @@ test "ground runs through the stops and clamps" {
     try testing.expectEqual(teal, ground(1.0 / 3.0));
     try testing.expectEqual(ground_stops[3], ground(1));
     try testing.expectEqual(ground_stops[3], ground(7));
+}
+
+test "luma weighs green most, ignores alpha" {
+    try testing.expectEqual(0, luma(0x000000FF));
+    try testing.expectApproxEqAbs(255, luma(0xFFFFFF00), 1e-3);
+    try testing.expect(luma(0x00FF00FF) > luma(0xFF0000FF));
 }
 
 test "shade darkens RGB, keeps alpha" {
