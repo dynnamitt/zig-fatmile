@@ -12,7 +12,6 @@ const core = @import("core");
 const terrain_render = @import("render/terrain.zig");
 const TerrainStream = @This();
 
-pub const range = core.streaming.chunk_range;
 /// Most chunks loaded per frame, so a border crossing never hitches.
 pub const loads_per_frame = 2;
 
@@ -72,9 +71,9 @@ pub fn deinit(s: *TerrainStream) void {
 /// those out of range; after any change, rebuilds the seam meshes that
 /// changed and the draw list.
 pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
-    var load_buf: [core.Hex.rangeCount(range.load)]core.Hex = undefined;
-    var unload_buf: [core.Hex.rangeCount(range.keep)]core.Hex = undefined;
-    const plan = core.streaming.plan(range, s.terrain.chunkAt(x, z), World{ .s = s }, s.loaded.items(.coord), budget, &load_buf, unload_buf[0..s.loaded.len]);
+    var load_buf: [core.Hex.rangeCount(core.streaming.chunk_range.load)]core.Hex = undefined;
+    var unload_buf: [core.Hex.rangeCount(core.streaming.chunk_range.keep)]core.Hex = undefined;
+    const plan = core.streaming.plan(core.streaming.chunk_range, s.terrain.chunkAt(x, z), World{ .s = s }, s.loaded.items(.coord), budget, &load_buf, unload_buf[0..s.loaded.len]);
     for (plan.unload) |c| {
         s.unload(core.Hex.indexOf(s.loaded.items(.coord), c).?);
     }

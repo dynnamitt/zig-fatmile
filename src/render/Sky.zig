@@ -1,14 +1,17 @@
-//! The sky, drawn behind everything: a full-screen quad whose shader turns
-//! each pixel into a view direction and colours it as `core.sky.color` does
-//! (horizon haze to zenith), with the sun's disc and glow and the moon's
-//! crescent. Draw it first inside `beginMode3D`, before the terrain.
+//! The sky, drawn behind everything: a full-screen quad at the far plane
+//! whose shader turns each pixel into a view direction and colours it
+//! (horizon haze, mauve, zenith teal; `core.sky.horizon_falloff`), with the
+//! sun's disc and glow and the moon's crescent. Draw it last inside
+//! `beginMode3D`: the depth test then shades only pixels the terrain left.
 const std = @import("std");
 const rl = @import("raylib");
 const core = @import("core");
 const glsl = @import("glsl.zig");
 const Sky = @This();
 
-// The quad's corners are already clip-space (x, y); each vertex unprojects
+// The quad's corners are already clip-space (x, y), at depth 1: the far
+// plane, which passes raylib's LEQUAL test only where nothing was drawn.
+// Each vertex unprojects
 // its own corner to a ray, at full vertex precision. Rays to points on the
 // far plane interpolate linearly across the screen, so the fragments get
 // exact directions to normalise.
@@ -20,7 +23,7 @@ const vs_body =
     \\    vec4 near = invViewProj * vec4(vertexPosition.xy, -1.0, 1.0);
     \\    vec4 far = invViewProj * vec4(vertexPosition.xy, 1.0, 1.0);
     \\    ray = far.xyz / far.w - near.xyz / near.w;
-    \\    gl_Position = vec4(vertexPosition.xy, 0.0, 1.0);
+    \\    gl_Position = vec4(vertexPosition.xy, 1.0, 1.0);
     \\}
 ;
 const fs_body =
@@ -45,7 +48,6 @@ const fs_body =
     \\}
     \\void main() {
     \\    vec3 dir = normalize(ray);
-    \\    // core.sky.color
     \\    float t = pow(clamp(dir.y, 0.0, 1.0), falloff);
     \\    vec3 col = t < 0.5 ? mix(horizon.rgb, mid.rgb, t * 2.0) : mix(mid.rgb, zenith.rgb, t * 2.0 - 1.0);
     \\    float up = step(0.0, dir.y);
@@ -67,17 +69,17 @@ pub fn load() !Sky {
     const shader = try glsl.load(vs_body, fs_body);
     const sky = core.sky;
     const p = core.palette;
-    setVec4(shader, "zenith", glsl.color(p.sky_zenith));
-    setVec4(shader, "horizon", glsl.color(p.sky_horizon));
-    setVec4(shader, "mid", glsl.color(p.sky_mid));
-    setFloat(shader, "falloff", sky.horizon_falloff);
-    setVec3(shader, "sunDir", sky.sun);
-    setVec4(shader, "sunColor", glsl.color(p.sun));
-    setFloat(shader, "sunCos", @cos(std.math.degreesToRadians(sky.sun_radius)));
-    setVec3(shader, "moonDir", sky.moon);
-    setVec3(shader, "moonShadowDir", sky.moonShadow());
-    setVec4(shader, "moonColor", glsl.color(p.moon));
-    setFloat(shader, "moonCos", @cos(std.math.degreesToRadians(sky.moon_radius)));
+    glsl.setColor(shader, "zenith", p.sky_zenith);
+    glsl.setColor(shader, "horizon", p.sky_horizon);
+    glsl.setColor(shader, "mid", p.sky_mid);
+    glsl.setFloat(shader, "falloff", sky.horizon_falloff);
+    glsl.setVec3(shader, "sunDir", sky.sun);
+    glsl.setColor(shader, "sunColor", p.sun);
+    glsl.setFloat(shader, "sunCos", @cos(std.math.degreesToRadians(sky.sun_radius)));
+    glsl.setVec3(shader, "moonDir", sky.moon);
+    glsl.setVec3(shader, "moonShadowDir", sky.moonShadow());
+    glsl.setColor(shader, "moonColor", p.moon);
+    glsl.setFloat(shader, "moonCos", @cos(std.math.degreesToRadians(sky.moon_radius)));
     return .{ .shader = shader, .inv_view_proj = rl.getShaderLocation(shader, "invViewProj") };
 }
 
@@ -85,31 +87,15 @@ pub fn unload(s: Sky) void {
     rl.unloadShader(s.shader);
 }
 
-/// Fills the screen with sky for the current camera. Call inside
-/// `beginMode3D`, before anything else: it writes no depth.
-pub fn draw(s: Sky) void {
-    const view_proj = rl.gl.rlGetMatrixModelview().multiply(rl.gl.rlGetMatrixProjection());
+/// Fills every pixel nothing else covered with sky. Call inside
+/// `beginMode3D`, after everything else.
+/// @param view_proj {rl.Matrix} the camera's, from `glsl.viewProj`.
+pub fn draw(s: Sky, view_proj: rl.Matrix) void {
     rl.setShaderValueMatrix(s.shader, s.inv_view_proj, view_proj.invert());
     rl.beginShaderMode(s.shader);
-    rl.gl.rlDisableDepthTest();
+    defer rl.endShaderMode(); // draws the batch with this shader
     rl.gl.rlBegin(rl.gl.rl_quads);
+    defer rl.gl.rlEnd();
     // Counter-clockwise, so back-face culling keeps it.
     for ([_][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } }) |c| rl.gl.rlVertex3f(c[0], c[1], 0);
-    rl.gl.rlEnd();
-    rl.gl.rlDrawRenderBatchActive(); // before depth testing comes back on
-    rl.gl.rlEnableDepthTest();
-    rl.endShaderMode();
-}
-
-fn setFloat(shader: rl.Shader, name: [:0]const u8, v: f32) void {
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &v, .float);
-}
-
-fn setVec3(shader: rl.Shader, name: [:0]const u8, v: core.Vec3) void {
-    const a = [3]f32{ v.x, v.y, v.z };
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &a, .vec3);
-}
-
-fn setVec4(shader: rl.Shader, name: [:0]const u8, v: rl.Vector4) void {
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &v, .vec4);
 }

@@ -100,7 +100,7 @@ fn frame() callconv(.c) void {
 
     rl.beginDrawing();
     defer rl.endDrawing();
-    rl.clearBackground(rl.getColor(core.palette.sky_horizon)); // the sky covers it
+    rl.clearBackground(rl.getColor(core.palette.background)); // the sky covers it
     var view = game.player.view(world, player, clock.alpha());
     view.eye.y += lift;
     const draws = scene.draw(scene.camera(view), sky, stream.pieces.items, stream.material);

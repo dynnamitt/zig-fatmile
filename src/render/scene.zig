@@ -2,7 +2,9 @@
 //! player's eyes.
 const rl = @import("raylib");
 const game = @import("game");
+const core = @import("core");
 const terrain = @import("terrain.zig");
+const glsl = @import("glsl.zig");
 const Sky = @import("Sky.zig");
 
 const p = game.player;
@@ -27,14 +29,16 @@ pub fn camera(v: p.View) rl.Camera3D {
     };
 }
 
-/// Draws the world: the sky, then the terrain pieces in view.
+/// Draws the world: the terrain pieces in view, then the sky behind them.
 /// @returns {usize} how many terrain meshes were drawn.
 pub fn draw(cam: rl.Camera3D, sky: Sky, pieces: []const terrain.Piece, material: rl.Material) usize {
     const height = @max(0, cam.position.y);
     rl.gl.rlSetClipPlanes(@max(near, height * near_per_height), far + height); // read by beginMode3D
     rl.beginMode3D(cam);
     defer rl.endMode3D();
-    sky.draw();
-    terrain.setEye(material, cam.position);
-    return terrain.draw(pieces, terrain.viewFrustum(), material);
+    const view_proj = glsl.viewProj();
+    const eye: core.Vec3 = .{ .x = cam.position.x, .y = cam.position.y, .z = cam.position.z };
+    const n = terrain.draw(pieces, terrain.frustumOf(view_proj), eye, material);
+    sky.draw(view_proj);
+    return n;
 }

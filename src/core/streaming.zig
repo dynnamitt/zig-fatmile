@@ -15,9 +15,12 @@ pub const Range = struct {
 };
 
 /// The game's range: 19 chunks round the player's own, freed past 3 steps.
-/// 2 steps keep at least 118 m loaded in every direction from anywhere in
-/// the player's chunk, which `sky.fog_end` relies on (1 step gives 45 m).
 pub const chunk_range: Range = .{ .load = 2, .keep = 3 };
+/// Metres loaded in every direction from anywhere in the player's chunk,
+/// once `chunk_range` has loaded (tested below by sampling: the true worst
+/// case, from a jagged chunk corner, is about 118 m; 1 step gives 45 m).
+/// `sky.fog_end` must stay within it.
+pub const min_loaded_radius: f32 = 115;
 
 pub const Plan = struct {
     /// Load these, in order (nearest first).
@@ -118,4 +121,26 @@ test "a walk across the world: player's chunk always loaded, budget kept" {
         try testing.expect(loaded.items.len <= Hex.rangeCount(r.keep));
     }
     try testing.expect(frees > 0);
+}
+
+test "min_loaded_radius is loaded all round, from anywhere in the chunk" {
+    const world = @import("world.zig");
+    // Sample chunk 0,0 (within its bounding box) and look out in 48 directions.
+    const corner = Hex.toWorld(.{ .q = @intCast(world.chunk_radius + 2), .r = 0 }, world.hex_size);
+    const reach = @abs(corner[0]) + @abs(corner[1]);
+    const step = world.hex_size / 2;
+    const dirs = 48;
+    var x: f32 = -reach;
+    while (x <= reach) : (x += step) {
+        var z: f32 = -reach;
+        while (z <= reach) : (z += step) {
+            const here = Hex.fromWorld(x, z, world.hex_size).toLowerRes(world.chunk_radius);
+            if (!here.eql(Hex.zero)) continue;
+            for (0..dirs) |i| {
+                const a = std.math.tau * @as(f32, @floatFromInt(i)) / dirs;
+                const there = Hex.fromWorld(x + min_loaded_radius * @cos(a), z + min_loaded_radius * @sin(a), world.hex_size).toLowerRes(world.chunk_radius);
+                try std.testing.expect(Hex.distance(here, there) <= chunk_range.load);
+            }
+        }
+    }
 }

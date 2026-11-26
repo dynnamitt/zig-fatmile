@@ -1,18 +1,19 @@
-//! The sky: its colour by view direction, the sun and the moon, and the
+//! The sky's settings: the sun and the moon, the gradient's shape, and the
 //! distance fog that fades the terrain into the horizon, so chunks never
-//! pop in at the edge of the loaded area. The sky shader (`render/Sky.zig`)
-//! and the terrain shader (`render/terrain.zig`) repeat `color` and `fog`;
-//! keep them in step.
+//! pop in at the edge of the loaded area. The colours are `palette.sky_*`.
+//! The formulas live in the shaders that use these (`render/Sky.zig`,
+//! `render/terrain.zig`); `hiddenByFog` is the one the CPU needs, for culling.
 const std = @import("std");
 const Vec3 = @import("vec.zig").Vec3;
-const palette = @import("palette.zig");
+const Aabb = @import("Aabb.zig");
+const motion = @import("motion.zig");
+const streaming = @import("streaming.zig");
 
 /// Unit vector towards the sky at compass bearing `azimuth` and `elevation`
-/// above the horizon, both in degrees. Bearing 0 is +x, 90 is +z.
+/// above the horizon, both in degrees. Bearing 0 is +x, 90 is +z: the
+/// player's look direction (`motion.lookDir`) at yaw 90° − bearing.
 pub fn direction(azimuth: f32, elevation: f32) Vec3 {
-    const az = std.math.degreesToRadians(azimuth);
-    const el = std.math.degreesToRadians(elevation);
-    return .{ .x = @cos(el) * @cos(az), .y = @sin(el), .z = @cos(el) * @sin(az) };
+    return motion.lookDir(std.math.degreesToRadians(90 - azimuth), std.math.degreesToRadians(elevation));
 }
 
 /// Towards the sun: low enough to show at the top of the view when you look
@@ -39,41 +40,31 @@ pub fn moonShadow() Vec3 {
     return moon.add(away.scale(offset)).normalize();
 }
 
-/// Gradient shape: `t = pow(dir.y, horizon_falloff)` runs from the horizon
-/// haze (0) through `palette.sky_mid` (0.5) to the zenith (1). Below 1 the
-/// haze band is thin.
+/// Gradient shape: `t = pow(dir.y, horizon_falloff)` runs from
+/// `palette.sky_horizon` (0) through `sky_mid` (0.5) to `sky_zenith` (1).
+/// Below 1 the haze band is thin. At and below the horizon the sky is
+/// `sky_horizon`, the fog colour, so fogged terrain meets it without a seam.
 pub const horizon_falloff: f32 = 0.45;
 
 /// Fog by horizontal distance from the eye, in metres: none up to
-/// `fog_start`, full sky-horizon colour from `fog_end`. `fog_end` stays
-/// inside the area that is always loaded round the player (tested below).
+/// `fog_start`, smoothstep to the full horizon colour at `fog_end`.
 pub const fog_start: f32 = 40;
 pub const fog_end: f32 = 110;
 
-/// Sky colour (no sun or moon) looking along unit vector `dir`. Below the
-/// horizon it is the horizon colour, which is also the fog colour, so
-/// fogged terrain meets the sky without a seam.
-/// @param dir {Vec3} view direction, unit length.
-/// @returns {u32} 0xRRGGBBAA.
-pub fn color(dir: Vec3) u32 {
-    const t = std.math.pow(f32, std.math.clamp(dir.y, 0, 1), horizon_falloff);
-    return if (t < 0.5)
-        palette.lerp(palette.sky_horizon, palette.sky_mid, t * 2)
-    else
-        palette.lerp(palette.sky_mid, palette.sky_zenith, t * 2 - 1);
+comptime {
+    // Bare edges of the loaded area must never show through.
+    std.debug.assert(fog_end <= streaming.min_loaded_radius);
 }
 
-/// How much fog covers a point `distance` metres away (horizontally).
-/// @returns {f32} 0 (clear) to 1 (sky colour), smoothstep between.
-pub fn fog(distance: f32) f32 {
-    const t = std.math.clamp((distance - fog_start) / (fog_end - fog_start), 0, 1);
-    return t * t * (3 - 2 * t);
+/// Whether the fog covers all of `box` seen from `eye`: it lies `fog_end`
+/// or more away horizontally and no higher than the eye. A fogged box
+/// above the eye isn't hidden: against the sky above the horizon, which is
+/// darker than the haze, its silhouette still shows.
+pub fn hiddenByFog(box: Aabb, eye: Vec3) bool {
+    return box.max.y <= eye.y and box.distanceXz(eye.x, eye.z) >= fog_end;
 }
 
 const testing = std.testing;
-const world = @import("world.zig");
-const Hex = @import("Hex.zig");
-const streaming = @import("streaming.zig");
 
 test "direction: bearing and elevation" {
     const d = direction(90, 30);
@@ -100,46 +91,13 @@ test "moonShadow: off the moon by the offset, on the side away from the sun" {
     try testing.expectApproxEqAbs(moon_radius * moon_shadow_offset, angle, 0.05);
 }
 
-test "color: horizon haze at and below the horizon, zenith straight up" {
-    try testing.expectEqual(palette.sky_horizon, color(.{ .x = 1, .y = 0, .z = 0 }));
-    try testing.expectEqual(palette.sky_horizon, color(.{ .x = 0, .y = -1, .z = 0 }));
-    try testing.expectEqual(palette.sky_zenith, color(Vec3.up));
-}
-
-test "fog: clear near, full far, rising in between" {
-    try testing.expectEqual(0, fog(0));
-    try testing.expectEqual(0, fog(fog_start));
-    try testing.expectEqual(1, fog(fog_end));
-    try testing.expectEqual(1, fog(1e6));
-    var last: f32 = 0;
-    var d: f32 = fog_start;
-    while (d <= fog_end) : (d += 1) {
-        try testing.expect(fog(d) >= last);
-        last = fog(d);
-    }
-}
-
-test "fog is full before the edge of the loaded area" {
-    // TerrainStream loads every chunk within `streaming.chunk_range.load` steps of
-    // the player's chunk. From anywhere in chunk 0,0, every point within
-    // `fog_end` must lie in such a chunk, or bare edges would show through.
-    const spacing = world.hex_size * @sqrt(3.0);
-    const reach: f32 = @as(f32, @floatFromInt(world.chunk_radius + 2)) * spacing;
-    const step = world.hex_size / 2;
-    const dirs = 48;
-    var x: f32 = -reach;
-    while (x <= reach) : (x += step) {
-        var z: f32 = -reach;
-        while (z <= reach) : (z += step) {
-            const here = Hex.fromWorld(x, z, world.hex_size).toLowerRes(world.chunk_radius);
-            if (!here.eql(Hex.zero)) continue;
-            for (0..dirs) |i| {
-                const a = std.math.tau * @as(f32, @floatFromInt(i)) / dirs;
-                const px = x + fog_end * @cos(a);
-                const pz = z + fog_end * @sin(a);
-                const there = Hex.fromWorld(px, pz, world.hex_size).toLowerRes(world.chunk_radius);
-                try testing.expect(Hex.distance(here, there) <= streaming.chunk_range.load);
-            }
-        }
-    }
+test "hiddenByFog: far and below the eye only" {
+    const eye: Vec3 = .{ .x = 0, .y = 10, .z = 0 };
+    const far = Aabb.ofPositions(&.{ fog_end + 1, 0, 0, fog_end + 20, 9, 5 });
+    try testing.expect(hiddenByFog(far, eye));
+    var tall = far;
+    tall.max.y = 11;
+    try testing.expect(!hiddenByFog(tall, eye));
+    const near = Aabb.ofPositions(&.{ fog_end - 1, 0, 0, fog_end + 20, 9, 5 });
+    try testing.expect(!hiddenByFog(near, eye));
 }

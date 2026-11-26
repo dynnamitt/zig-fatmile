@@ -4,6 +4,7 @@
 //! not the build target. Bodies use `IN`/`OUT` for varyings and attributes
 //! and write `FRAG_COLOR`.
 const rl = @import("raylib");
+const core = @import("core");
 
 const Headers = struct { vs: [:0]const u8, fs: [:0]const u8 };
 const glsl_330: Headers = .{
@@ -45,4 +46,25 @@ fn with(comptime h: Headers, comptime vs_body: [:0]const u8, comptime fs_body: [
 /// `c` (0xRRGGBBAA) as the vec4 a colour uniform takes.
 pub fn color(c: u32) rl.Vector4 {
     return rl.colorNormalize(rl.getColor(c));
+}
+
+pub fn setFloat(shader: rl.Shader, name: [:0]const u8, v: f32) void {
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &v, .float);
+}
+
+pub fn setVec3(shader: rl.Shader, name: [:0]const u8, v: core.Vec3) void {
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &v, .vec3); // extern: 3 packed f32s
+}
+
+/// Sets a vec4 uniform to colour `c` (0xRRGGBBAA).
+pub fn setColor(shader: rl.Shader, name: [:0]const u8, c: u32) void {
+    const v = color(c);
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, name), &v, .vec4);
+}
+
+/// The current camera's view-projection matrix, from rlgl: call between
+/// `beginMode3D` and `endMode3D`. raymath's multiply(a, b) is b·a as
+/// maths, so this is projection·view.
+pub fn viewProj() rl.Matrix {
+    return rl.gl.rlGetMatrixModelview().multiply(rl.gl.rlGetMatrixProjection());
 }

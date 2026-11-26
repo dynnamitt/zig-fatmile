@@ -92,36 +92,21 @@ pub fn upload(m: core.ChunkMesh) rl.Mesh {
 /// after the window opens; `rl.unloadMaterial` frees the shader too.
 /// @returns {rl.Material} the material; see `glsl.load` for its errors.
 pub fn loadMaterial() !rl.Material {
-    var shader = try glsl.load(vs_body, fs_body);
+    const shader = try glsl.load(vs_body, fs_body);
     errdefer rl.unloadShader(shader);
-    // raylib's slot for the camera position; `setEye` writes it each frame.
-    shader.locs[@backingInt(rl.ShaderLocationIndex.vector_view)] = rl.getShaderLocation(shader, "viewPos");
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "fogStart"), &core.sky.fog_start, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "fogEnd"), &core.sky.fog_end, .float);
-    const fog_color = glsl.color(core.palette.sky_horizon);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "fogColor"), &fog_color, .vec4);
-
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineWidth"), &line_width, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "minLinePx"), &min_line_px, .float);
-    const line_color = glsl.color(core.palette.line);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColor"), &line_color, .vec4);
-    const line_color_high = glsl.color(core.palette.line_high);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColorHigh"), &line_color_high, .vec4);
-    const blend_from = line_blend_from * core.world.max_height;
-    const blend_to = line_blend_to * core.world.max_height;
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendFrom"), &blend_from, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendTo"), &blend_to, .float);
+    glsl.setFloat(shader, "fogStart", core.sky.fog_start);
+    glsl.setFloat(shader, "fogEnd", core.sky.fog_end);
+    glsl.setColor(shader, "fogColor", core.palette.sky_horizon);
+    glsl.setFloat(shader, "lineWidth", line_width);
+    glsl.setFloat(shader, "minLinePx", min_line_px);
+    glsl.setColor(shader, "lineColor", core.palette.line);
+    glsl.setColor(shader, "lineColorHigh", core.palette.line_high);
+    glsl.setFloat(shader, "lineBlendFrom", line_blend_from * core.world.max_height);
+    glsl.setFloat(shader, "lineBlendTo", line_blend_to * core.world.max_height);
 
     var material = try rl.loadMaterialDefault();
     material.shader = shader;
     return material;
-}
-
-/// Tells the terrain shader where the camera is, for the fog. Call each
-/// frame before drawing.
-pub fn setEye(material: rl.Material, eye: rl.Vector3) void {
-    const s = material.shader;
-    rl.setShaderValue(s, s.locs[@backingInt(rl.ShaderLocationIndex.vector_view)], &eye, .vec3);
 }
 
 /// One chunk to draw: its own mesh and the seams it draws, culled together.
@@ -132,11 +117,8 @@ pub const Piece = struct {
     seams: ?rl.Mesh,
 };
 
-/// The current camera's frustum, from rlgl's matrices: call between
-/// `beginMode3D` and `endMode3D`.
-pub fn viewFrustum() core.Frustum {
-    // raymath's multiply(a, b) is b·a as maths, so this is projection·view.
-    const m = rl.gl.rlGetMatrixModelview().multiply(rl.gl.rlGetMatrixProjection());
+/// The frustum of view-projection matrix `m` (from `glsl.viewProj`).
+pub fn frustumOf(m: rl.Matrix) core.Frustum {
     return .fromMatrix(.{
         .{ m.m0, m.m4, m.m8, m.m12 },
         .{ m.m1, m.m5, m.m9, m.m13 },
@@ -145,13 +127,15 @@ pub fn viewFrustum() core.Frustum {
     });
 }
 
-/// Draws the `pieces` that touch `frustum` (vertex colours, world-space
-/// vertices) with `material`.
+/// Draws the `pieces` in view from `eye` (vertex colours, world-space
+/// vertices) with `material`: those that touch `frustum` and that the fog
+/// doesn't wholly hide (`core.sky.hiddenByFog`).
 /// @returns {usize} how many meshes were drawn.
-pub fn draw(pieces: []const Piece, frustum: core.Frustum, material: rl.Material) usize {
+pub fn draw(pieces: []const Piece, frustum: core.Frustum, eye: core.Vec3, material: rl.Material) usize {
+    glsl.setVec3(material.shader, "viewPos", eye); // for the fog
     var n: usize = 0;
     for (pieces) |p| {
-        if (!frustum.touches(p.bounds)) continue;
+        if (!frustum.touches(p.bounds) or core.sky.hiddenByFog(p.bounds, eye)) continue;
         rl.drawMesh(p.own, material, rl.Matrix.identity());
         n += 1;
         if (p.seams) |m| {
