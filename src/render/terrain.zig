@@ -94,6 +94,9 @@ pub fn upload(m: core.ChunkMesh) rl.Mesh {
 pub fn loadMaterial() !rl.Material {
     const shader = try glsl.load(vs_body, fs_body);
     errdefer rl.unloadShader(shader);
+    // raylib's slot for a camera-position uniform. raylib doesn't fill it;
+    // it keeps the location, so `draw` needn't look it up every frame.
+    shader.locs[view_pos_slot] = rl.getShaderLocation(shader, "viewPos");
     glsl.setFloat(shader, "fogStart", core.sky.fog_start);
     glsl.setFloat(shader, "fogEnd", core.sky.fog_end);
     glsl.setColor(shader, "fogColor", core.palette.sky_horizon);
@@ -108,6 +111,8 @@ pub fn loadMaterial() !rl.Material {
     material.shader = shader;
     return material;
 }
+
+const view_pos_slot = @backingInt(rl.ShaderLocationIndex.vector_view);
 
 /// One chunk to draw: its own mesh and the seams it draws, culled together.
 pub const Piece = struct {
@@ -132,7 +137,7 @@ pub fn frustumOf(m: rl.Matrix) core.Frustum {
 /// doesn't wholly hide (`core.sky.hiddenByFog`).
 /// @returns {usize} how many meshes were drawn.
 pub fn draw(pieces: []const Piece, frustum: core.Frustum, eye: core.Vec3, material: rl.Material) usize {
-    glsl.setVec3(material.shader, "viewPos", eye); // for the fog
+    rl.setShaderValue(material.shader, material.shader.locs[view_pos_slot], &eye, .vec3); // for the fog
     var n: usize = 0;
     for (pieces) |p| {
         if (!frustum.touches(p.bounds) or core.sky.hiddenByFog(p.bounds, eye)) continue;

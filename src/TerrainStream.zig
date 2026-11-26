@@ -13,7 +13,7 @@ const terrain_render = @import("render/terrain.zig");
 const TerrainStream = @This();
 
 /// Most chunks loaded per frame, so a border crossing never hitches.
-pub const loads_per_frame = 2;
+pub const loads_per_frame = core.streaming.crossingLoads(core.streaming.chunk_range);
 
 const Loaded = struct {
     coord: core.Hex,

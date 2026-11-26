@@ -19,14 +19,25 @@ const vs_body =
     \\IN vec3 vertexPosition;
     \\uniform mat4 invViewProj;
     \\OUT vec3 ray;
+    \\vec3 rayAt(vec2 ndc) {
+    \\    vec4 near = invViewProj * vec4(ndc, -1.0, 1.0);
+    \\    vec4 far = invViewProj * vec4(ndc, 1.0, 1.0);
+    \\    return far.xyz / far.w - near.xyz / near.w;
+    \\}
     \\void main() {
-    \\    vec4 near = invViewProj * vec4(vertexPosition.xy, -1.0, 1.0);
-    \\    vec4 far = invViewProj * vec4(vertexPosition.xy, 1.0, 1.0);
-    \\    ray = far.xyz / far.w - near.xyz / near.w;
+    \\    // About as long as the far plane is far, which overflows mediump
+    \\    // fragments: scale every corner by the same factor, so the rays
+    \\    // still interpolate exactly.
+    \\    ray = rayAt(vertexPosition.xy) / length(rayAt(vec2(0.0)));
     \\    gl_Position = vec4(vertexPosition.xy, 1.0, 1.0);
     \\}
 ;
+// highp where the GPU has it: the sun and moon discs compare cosines within
+// 3e-4 of 1, finer than fp16 mediump resolves.
 const fs_body =
+    \\#ifdef GL_FRAGMENT_PRECISION_HIGH
+    \\precision highp float;
+    \\#endif
     \\IN vec3 ray;
     \\uniform vec4 zenith;
     \\uniform vec4 horizon;

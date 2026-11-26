@@ -26,7 +26,7 @@ pub const sun_radius: f32 = 2.2;
 pub const moon = direction(-110, 18);
 pub const moon_radius: f32 = 1.4;
 /// The moon's dark part is a disc this far (in moon radii) off its centre,
-/// towards the horizon away from the sun, which leaves a crescent.
+/// away from the sun, which leaves a crescent.
 pub const moon_shadow_offset: f32 = 0.45;
 
 /// Centre of the disc that hides the moon's dark part: the moon's own
