@@ -25,11 +25,12 @@ pub fn camera(v: p.View) rl.Camera3D {
     };
 }
 
-/// Draws the world.
-pub fn draw(cam: rl.Camera3D, meshes: []const rl.Mesh, material: rl.Material) void {
+/// Draws the world: the terrain pieces in view.
+/// @returns {usize} how many meshes were drawn.
+pub fn draw(cam: rl.Camera3D, pieces: []const terrain.Piece, material: rl.Material) usize {
     const height = @max(0, cam.position.y);
     rl.gl.rlSetClipPlanes(@max(near, height * near_per_height), far + height); // read by beginMode3D
     rl.beginMode3D(cam);
     defer rl.endMode3D();
-    terrain.draw(meshes, material);
+    return terrain.draw(pieces, terrain.viewFrustum(), material);
 }

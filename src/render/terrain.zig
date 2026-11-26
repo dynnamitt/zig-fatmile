@@ -1,5 +1,5 @@
-//! Chunk meshes on the GPU: one raylib `Mesh` per chunk, uploaded once, and
-//! the terrain shader. The shader draws the baked vertex colours and paints
+//! Chunk meshes on the GPU: per chunk its own mesh, uploaded once, and one
+//! mesh of the seams it draws; frustum culling; and the terrain shader. The shader draws the baked vertex colours and paints
 //! the partition lines along all four edges of every gap quad, inside it,
 //! from the per-vertex edge distances in `core.ChunkMesh.rims` and
 //! `.bridges`: on the surface, so they can't float above the ground, and the
@@ -15,9 +15,9 @@ const line_width: f32 = 0.08;
 const min_line_px: f32 = 1.0;
 /// Line colour by height: `palette.line` in the valleys, blending to
 /// `palette.line_high` on the ridges. The blend runs over the band of heights
-/// the noise mostly yields (as fractions of `core.world.max_height`).
-const line_low: f32 = 0.2;
-const line_high: f32 = 0.8;
+/// the noise mostly yields, as fractions of `core.world.max_height`.
+const line_blend_from: f32 = 0.2;
+const line_blend_to: f32 = 0.8;
 
 // One shader body for every backend; the header adapts it to the GLSL that
 // raylib's graphics API (rlGetVersion) speaks. The same code on web and
@@ -68,13 +68,13 @@ const fs_body =
     \\uniform float minLinePx;
     \\uniform vec4 lineColor;
     \\uniform vec4 lineColorHigh;
-    \\uniform float lineLow;
-    \\uniform float lineHigh;
+    \\uniform float lineBlendFrom;
+    \\uniform float lineBlendTo;
     \\void main() {
     \\    float d = min(min(rims.x, rims.y), min(bridges.x, bridges.y));
     \\    float px = fwidth(d);
     \\    float width = max(lineWidth, px * minLinePx);
-    \\    float up = smoothstep(lineLow, lineHigh, height);
+    \\    float up = smoothstep(lineBlendFrom, lineBlendTo, height);
     \\    vec4 line = mix(lineColor, lineColorHigh, up);
     \\    FRAG_COLOR = mix(line, color, smoothstep(width - px, width, d));
     \\}
@@ -118,10 +118,10 @@ pub fn loadMaterial() !rl.Material {
     rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColor"), &line_color, .vec4);
     const line_color_high = rl.colorNormalize(rl.getColor(core.palette.line_high));
     rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineColorHigh"), &line_color_high, .vec4);
-    const low = line_low * core.world.max_height;
-    const high = line_high * core.world.max_height;
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineLow"), &low, .float);
-    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineHigh"), &high, .float);
+    const blend_from = line_blend_from * core.world.max_height;
+    const blend_to = line_blend_to * core.world.max_height;
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendFrom"), &blend_from, .float);
+    rl.setShaderValue(shader, rl.getShaderLocation(shader, "lineBlendTo"), &blend_to, .float);
 
     var material = try rl.loadMaterialDefault();
     material.shader = shader;
@@ -132,7 +132,40 @@ fn load(comptime h: Headers) !rl.Shader {
     return rl.loadShaderFromMemory(h.vs ++ vs_body, h.fs ++ fs_body);
 }
 
-/// Draws `meshes` (vertex colours, world-space vertices) with `material`.
-pub fn draw(meshes: []const rl.Mesh, material: rl.Material) void {
-    for (meshes) |m| rl.drawMesh(m, material, rl.Matrix.identity());
+/// One chunk to draw: its own mesh and the seams it draws, culled together.
+pub const Piece = struct {
+    /// Round both meshes.
+    bounds: core.Aabb,
+    own: rl.Mesh,
+    seams: ?rl.Mesh,
+};
+
+/// The current camera's frustum, from rlgl's matrices: call between
+/// `beginMode3D` and `endMode3D`.
+pub fn viewFrustum() core.Frustum {
+    // raymath's multiply(a, b) is b·a as maths, so this is projection·view.
+    const m = rl.gl.rlGetMatrixModelview().multiply(rl.gl.rlGetMatrixProjection());
+    return .fromMatrix(.{
+        .{ m.m0, m.m4, m.m8, m.m12 },
+        .{ m.m1, m.m5, m.m9, m.m13 },
+        .{ m.m2, m.m6, m.m10, m.m14 },
+        .{ m.m3, m.m7, m.m11, m.m15 },
+    });
+}
+
+/// Draws the `pieces` that touch `frustum` (vertex colours, world-space
+/// vertices) with `material`.
+/// @returns {usize} how many meshes were drawn.
+pub fn draw(pieces: []const Piece, frustum: core.Frustum, material: rl.Material) usize {
+    var n: usize = 0;
+    for (pieces) |p| {
+        if (!frustum.touches(p.bounds)) continue;
+        rl.drawMesh(p.own, material, rl.Matrix.identity());
+        n += 1;
+        if (p.seams) |m| {
+            rl.drawMesh(m, material, rl.Matrix.identity());
+            n += 1;
+        }
+    }
+    return n;
 }

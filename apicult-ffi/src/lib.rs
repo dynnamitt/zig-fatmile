@@ -60,12 +60,33 @@ pub const WORLD: World = World {
     radius_seed: 137,
 };
 
+/// Why a chunk couldn't be built. Each is a broken invariant of apicult's
+/// layout; `ac_chunk` reports it as null, so the game skips the chunk
+/// instead of aborting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkError {
+    /// A cell of the chunk is missing from its own layout.
+    MissingCell(Hex),
+    /// A cell's run doesn't start with its 6 face tris, or a ring cell has a face.
+    BadFaces(Hex),
+    /// A seam junction's vertex is no corner of its ring cell or a neighbour.
+    StrayVertex(Hex),
+    /// A count doesn't fit its field in the format.
+    TooMany(&'static str),
+}
+
+/// `n` as the format's narrower integer, or `TooMany(what)`.
+fn fit<T: TryFrom<usize>>(n: usize, what: &'static str) -> Result<T, ChunkError> {
+    T::try_from(n).map_err(|_| ChunkError::TooMany(what))
+}
+
 /// Builds one chunk and encodes it.
 ///
 /// @param world {World} — the world's settings, the same for every chunk.
 /// @param coord {Hex} — the chunk's coordinate on the chunk lattice.
-/// @returns {Vec<u8>} the chunk as HXCK v3 bytes (format in the module docs).
-pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
+/// @returns {Result<Vec<u8>, ChunkError>} the chunk as HXCK v3 bytes (format
+/// in the module docs), or which layout invariant broke.
+pub fn chunk_bytes(world: World, coord: Hex) -> Result<Vec<u8>, ChunkError> {
     let settings = HGridSettings {
         nominal_hex_radius: world.hex_size,
         max_height: world.max_height,
@@ -85,24 +106,29 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
     ]
     .concat();
     for h in shapes::hexagon(layout.center(), world.chunk_radius) {
-        let cell = layout.cell(&h).expect("own cell is in the chunk layout");
-        let first = tris.len();
+        let cell = layout.cell(&h).ok_or(ChunkError::MissingCell(h))?;
+        let first: u32 = fit(tris.len(), "tris")?;
         let (faces, quads, junctions) = layout.owned_tris_into(h, false, &mut tris);
-        assert_eq!(faces, 6, "own cells always own their face fan");
+        if faces != 6 {
+            return Err(ChunkError::BadFaces(h)); // own cells always own their face fan
+        }
         out.extend_from_slice(&h.x.to_le_bytes());
         out.extend_from_slice(&h.y.to_le_bytes());
         out.extend_from_slice(&cell.height.to_le_bytes());
         out.extend_from_slice(&cell.radius.to_le_bytes());
-        out.extend_from_slice(&(first as u32).to_le_bytes());
-        out.extend_from_slice(&[(quads / 2) as u8, junctions as u8, 0, 0]);
+        out.extend_from_slice(&first.to_le_bytes());
+        out.extend_from_slice(&[fit(quads / 2, "quads")?, fit(junctions, "junctions")?, 0, 0]);
     }
     let n_cells = (out.len() - HEADER_LEN) / CELL_LEN;
-    let seams = seams(&layout, coord, world.chunk_radius);
+    let seams = seams(&layout, coord, world.chunk_radius)?;
     let n_seam_tris: usize = seams
         .iter()
         .map(|s| s.quads.len() + s.junctions.len())
         .sum();
-    let counts = [n_cells, tris.len(), seams.len(), n_seam_tris].map(|n| (n as u32).to_le_bytes());
+    let counts = [n_cells, tris.len(), seams.len(), n_seam_tris]
+        .map(|n| fit::<u32>(n, "header counts").map(u32::to_le_bytes))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     out[N_CELLS_AT..][..16].copy_from_slice(&counts.concat());
     out.extend(
         tris.iter()
@@ -115,8 +141,8 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
         [s.owner.x, s.owner.y, also.x, also.y]
             .iter()
             .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        out.extend_from_slice(&(s.quads.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(s.junctions.len() as u16).to_le_bytes());
+        out.extend_from_slice(&fit::<u16>(s.quads.len(), "seam quads")?.to_le_bytes());
+        out.extend_from_slice(&fit::<u16>(s.junctions.len(), "seam junctions")?.to_le_bytes());
         out.extend_from_slice(&[u8::from(s.also.is_some()), 0, 0, 0]);
     }
     let seam_tris = seams
@@ -130,7 +156,7 @@ pub fn chunk_bytes(world: World, coord: Hex) -> Vec<u8> {
     );
     let hash = fnv1a64(&out[HEADER_LEN..]);
     out[HASH_AT..][..8].copy_from_slice(&hash.to_le_bytes());
-    out
+    Ok(out)
 }
 
 /// One seam group, split into its gap-quad tris and its junction tris.
@@ -146,53 +172,76 @@ struct SeamGroup {
 /// tri a ring cell owns, keyed by `(owner, also)`, in first-seen order
 /// walking the ring. Unlike apicult's, each group keeps quads and junctions
 /// apart, so the quads stay in pairs for the line shader.
-fn seams(layout: &HGridLayout, coord: Hex, r: u32) -> Vec<SeamGroup> {
-    // A seam vertex is bit-for-bit a `vertex()` of ring cell `h` or a neighbour.
+///
+/// Ring cells are entangled, so `owned_tris_into(h, false)` gives them no
+/// face and only the quads towards this chunk's own (unentangled) cells:
+/// a quad touches `owner` and `coord`, never a third chunk. Only junctions
+/// need their vertices looked up, and their first vertex is `h`'s own corner.
+///
+/// @returns {Result<Vec<SeamGroup>, ChunkError>} the groups, or the ring
+/// cell whose tris broke those rules.
+fn seams(layout: &HGridLayout, coord: Hex, r: u32) -> Result<Vec<SeamGroup>, ChunkError> {
+    // A junction vertex is bit-for-bit a `vertex()` of ring cell `h` or a neighbour.
     let chunk_of = |h: Hex, v: &Vec3| {
         std::iter::once(h)
             .chain(h.all_neighbors())
             .find(|&n| (0..6).any(|i| layout.vertex(n, i) == Some(*v)))
-            .expect("seam vertex is a corner of its ring cell or a neighbour")
-            .to_lower_res(r)
+            .map(|n| n.to_lower_res(r))
+            .ok_or(ChunkError::StrayVertex(h))
     };
-    let mut groups: Vec<SeamGroup> = Vec::new();
-    for h in layout.center().ring(r + 1) {
+    // Every ring cell's tris, tagged with (owner, also, is_quad).
+    let tagged = layout.center().ring(r + 1).map(|h| {
         let owner = h.to_lower_res(r);
         let mut tris = Vec::new();
         let (faces, quads, _) = layout.owned_tris_into(h, false, &mut tris);
-        assert_eq!(
-            faces, 0,
-            "ring cells are entangled: no face of their own here"
-        );
-        for (i, t) in tris.into_iter().enumerate() {
-            let also = t
-                .iter()
-                .map(|v| chunk_of(h, v))
-                .find(|&c| c != coord && c != owner);
-            let at = match groups
-                .iter()
-                .position(|s| s.owner == owner && s.also == also)
-            {
-                Some(at) => at,
-                None => {
-                    groups.push(SeamGroup {
-                        owner,
-                        also,
-                        quads: Vec::new(),
-                        junctions: Vec::new(),
-                    });
-                    groups.len() - 1
-                }
-            };
-            if i < quads {
-                &mut groups[at].quads
-            } else {
-                &mut groups[at].junctions
-            }
-            .push(t);
+        if faces != 0 {
+            return Err(ChunkError::BadFaces(h)); // ring cells are entangled
         }
-    }
-    groups
+        tris.into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let also = if i < quads {
+                    None
+                } else {
+                    t[1..]
+                        .iter()
+                        .map(|v| chunk_of(h, v))
+                        .find(|c| c.as_ref().map_or(true, |&c| c != coord && c != owner))
+                        .transpose()?
+                };
+                Ok((owner, also, i < quads, t))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    });
+    tagged
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .try_fold(
+            Vec::<SeamGroup>::new(),
+            |mut groups, (owner, also, is_quad, t)| {
+                let at = groups
+                    .iter()
+                    .position(|s| s.owner == owner && s.also == also)
+                    .unwrap_or_else(|| {
+                        groups.push(SeamGroup {
+                            owner,
+                            also,
+                            quads: Vec::new(),
+                            junctions: Vec::new(),
+                        });
+                        groups.len() - 1
+                    });
+                let g = &mut groups[at];
+                if is_quad {
+                    &mut g.quads
+                } else {
+                    &mut g.junctions
+                }
+                .push(t);
+                Ok(groups)
+            },
+        )
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -210,8 +259,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// @param radius_seed {u32} — cell-radius-noise seed, likewise.
 /// @param q {i32} — the chunk's coordinate on the chunk lattice.
 /// @param r {i32} — likewise.
-/// @param out_len {*mut usize} — receives the byte count.
-/// @returns {*mut u8} the bytes, never null.
+/// @param out_len {*mut usize} — receives the byte count (0 on failure).
+/// @returns {*mut u8} the bytes, or null if the chunk couldn't be built
+/// (a broken layout invariant, `ChunkError`); nothing to free then.
 ///
 /// # Safety
 /// `out_len` must be valid for a write.
@@ -234,7 +284,11 @@ pub unsafe extern "C" fn ac_chunk(
         height_seed,
         radius_seed,
     };
-    let bytes = chunk_bytes(world, Hex::new(q, r)).into_boxed_slice();
+    let Ok(bytes) = chunk_bytes(world, Hex::new(q, r)) else {
+        unsafe { *out_len = 0 };
+        return std::ptr::null_mut();
+    };
+    let bytes = bytes.into_boxed_slice();
     unsafe { *out_len = bytes.len() };
     Box::into_raw(bytes).cast()
 }
@@ -265,7 +319,7 @@ mod tests {
     fn header_counts_match_payload_anywhere() {
         // Near the origin, and far past the old checked-in world's edge.
         for coord in [Hex::new(-3, 2), Hex::new(400, -900)] {
-            let b = chunk_bytes(WORLD, coord);
+            let b = chunk_bytes(WORLD, coord).unwrap();
             let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
             assert_eq!(&b[0..4], MAGIC);
             assert_eq!(u32_at(N_CELLS_AT), 127); // 1 + 3·6·7 cells
@@ -310,7 +364,7 @@ mod tests {
         };
         for coord in [Hex::ZERO, Hex::new(-3, 2), Hex::new(7, -1)] {
             let layout = HGridLayout::for_chunk(&settings, coord, WORLD.chunk_radius);
-            let ours = seams(&layout, coord, WORLD.chunk_radius);
+            let ours = seams(&layout, coord, WORLD.chunk_radius).unwrap();
             let theirs = source.chunk(coord).seams;
             assert_eq!(ours.len(), theirs.len());
             for (o, t) in ours.iter().zip(&theirs) {
@@ -333,7 +387,7 @@ mod tests {
     /// `UPDATE_FIXTURE=1 cargo test` rewrites the fixture.
     #[test]
     fn fixture_is_current() {
-        let bytes = chunk_bytes(WORLD, Hex::ZERO);
+        let bytes = chunk_bytes(WORLD, Hex::ZERO).unwrap();
         if std::env::var_os("UPDATE_FIXTURE").is_some() {
             std::fs::write(FIXTURE, &bytes).unwrap();
         }
@@ -341,6 +395,34 @@ mod tests {
             std::fs::read(FIXTURE).unwrap() == bytes,
             "fixture is stale: UPDATE_FIXTURE=1 cargo test"
         );
+    }
+
+    #[test]
+    fn ac_chunk_round_trip() {
+        let mut len = 0;
+        let w = WORLD;
+        let ptr = unsafe {
+            ac_chunk(
+                w.chunk_radius,
+                w.hex_size,
+                w.max_height,
+                w.height_seed,
+                w.radius_seed,
+                2,
+                -1,
+                &mut len,
+            )
+        };
+        assert!(!ptr.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        unsafe { ac_free(ptr, len) };
+        assert_eq!(bytes, chunk_bytes(WORLD, Hex::new(2, -1)).unwrap());
+    }
+
+    #[test]
+    fn counts_that_overflow_are_errors() {
+        assert_eq!(fit::<u8>(255, "x"), Ok(255));
+        assert_eq!(fit::<u8>(256, "x"), Err(ChunkError::TooMany("x")));
     }
 
     #[test]

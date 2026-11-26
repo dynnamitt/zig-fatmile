@@ -64,10 +64,20 @@ pub const Seam = extern struct {
     has_also: u8,
     _pad: [3]u8,
 
+    /// The chunk that owns these triangles.
+    /// @returns {Hex} its coordinate on the chunk lattice; a neighbour of the carrier.
     pub fn owner(s: Seam) Hex {
         return .{ .q = s.owner_q, .r = s.owner_r };
     }
 
+    /// The third chunk a corner junction touches.
+    /// @returns {?Hex} its coordinate, or null for a seam between two chunks.
+    pub fn also(s: Seam) ?Hex {
+        return if (s.has_also != 0) .{ .q = s.also_q, .r = s.also_r } else null;
+    }
+
+    /// How many triangles the seam holds.
+    /// @returns {u32} its gap-quad tris plus its junction tris.
     pub fn triCount(s: Seam) u32 {
         return @as(u32, s.n_quad_tris) + s.n_junction_tris;
     }
@@ -82,11 +92,26 @@ pub const Seam = extern struct {
     /// @returns {bool} whether to draw `s`.
     pub fn drawn(s: Seam, carrier: Hex, loaded: anytype) bool {
         if (loaded.loaded(s.owner())) return false;
-        if (s.has_also == 0) return true;
-        const also: Hex = .{ .q = s.also_q, .r = s.also_r };
-        return !loaded.loaded(also) or carrier.q < also.q or (carrier.q == also.q and carrier.r < also.r);
+        const a = s.also() orelse return true;
+        return !loaded.loaded(a) or carrier.q < a.q or (carrier.q == a.q and carrier.r < a.r);
     }
 };
+
+/// Which chunks are loaded, for `Seam.drawn`: a plain list, searched in
+/// order (a few dozen chunks at most).
+pub const LoadedSet = struct {
+    coords: []const Hex,
+
+    pub fn loaded(l: LoadedSet, c: Hex) bool {
+        return Hex.indexOf(l.coords, c) != null;
+    }
+};
+
+/// Most seams a chunk may have, so a set of them fits in a `SeamMask`.
+/// apicult makes at most 12: 6 neighbour owners and 6 corners.
+pub const max_seams = 64;
+/// Bit `i` stands for `seams[i]`.
+pub const SeamMask = u64;
 
 comptime {
     // The file is little-endian and read in place.
@@ -103,7 +128,7 @@ seams: []align(1) const Seam,
 /// Every seam's tris, in `seams` order.
 seam_tris: []align(1) const Tri,
 
-pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, HashMismatch, BadCellRun, BadSeamRun };
+pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, HashMismatch, BadCellRun, BadSeamRun, TooManySeams };
 
 /// Validates `bytes` (header, payload length, hash, cell and seam runs) and returns
 /// views into it. `bytes` must outlive the result.
@@ -114,6 +139,7 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     const n_cells = readInt(u32, bytes, 16);
     const n_tris = readInt(u32, bytes, 20);
     const n_seams = readInt(u32, bytes, 24);
+    if (n_seams > max_seams) return error.TooManySeams;
     const n_seam_tris = readInt(u32, bytes, 28);
     const hash = readInt(u64, bytes, 32);
 
@@ -154,11 +180,48 @@ pub fn parse(bytes: []const u8) Error!Chunk {
     return chunk;
 }
 
-/// The triangles of seam `i`: its gap-quad tris (pairs), then its junction tris.
-pub fn seamTris(chunk: Chunk, i: usize) []align(1) const Tri {
-    var first: usize = 0;
-    for (chunk.seams[0..i]) |s| first += s.triCount();
-    return chunk.seam_tris[first..][0..chunk.seams[i].triCount()];
+/// Walks the seams in order with their triangles, keeping a running offset
+/// into `seam_tris`.
+pub const SeamIterator = struct {
+    chunk: Chunk,
+    i: usize = 0,
+    first: usize = 0,
+
+    pub const Item = struct {
+        index: usize,
+        seam: Seam,
+        /// Its gap-quad tris (pairs), then its junction tris.
+        tris: []align(1) const Tri,
+    };
+
+    /// @returns {?Item} the next seam and its tris, or null after the last.
+    pub fn next(it: *SeamIterator) ?Item {
+        if (it.i == it.chunk.seams.len) return null;
+        const seam = it.chunk.seams[it.i];
+        const n = seam.triCount();
+        defer {
+            it.i += 1;
+            it.first += n;
+        }
+        return .{ .index = it.i, .seam = seam, .tris = it.chunk.seam_tris[it.first..][0..n] };
+    }
+};
+
+/// Every seam with its triangles, in `seams` order.
+/// @returns {SeamIterator} the walk; `parse` checked the runs fit.
+pub fn seamIterator(chunk: Chunk) SeamIterator {
+    return .{ .chunk = chunk };
+}
+
+/// The seams this chunk should draw now, by `Seam.drawn`.
+/// @param loaded {anytype} has `fn loaded(Hex) bool`, e.g. a `LoadedSet`.
+/// @returns {SeamMask} bit `i` set when `seams[i]` is drawn.
+pub fn drawnSeams(chunk: Chunk, loaded: anytype) SeamMask {
+    var mask: SeamMask = 0;
+    for (chunk.seams, 0..) |s, i| {
+        if (s.drawn(chunk.coord, loaded)) mask |= @as(SeamMask, 1) << @intCast(i);
+    }
+    return mask;
 }
 
 /// The triangles `cell` owns.
@@ -220,40 +283,51 @@ test "seams: neighbour owners, all seam tris accounted for" {
     const chunk = try parse(test_data.chunk_bytes);
     try testing.expect(chunk.seams.len > 0);
     var total: usize = 0;
-    for (chunk.seams, 0..) |s, i| {
+    var it = chunk.seamIterator();
+    var i: usize = 0;
+    while (it.next()) |item| : (i += 1) {
+        const s = item.seam;
+        try testing.expectEqual(i, item.index);
         // Owners are the 6 neighbouring chunks; a corner's `also` is another.
         try testing.expectEqual(1, Hex.distance(s.owner(), chunk.coord));
-        if (s.has_also != 0) try testing.expectEqual(1, Hex.distance(.{ .q = s.also_q, .r = s.also_r }, chunk.coord));
-        total += chunk.seamTris(i).len;
+        if (s.also()) |a| try testing.expectEqual(1, Hex.distance(a, chunk.coord));
+        try testing.expectEqual(s.triCount(), item.tris.len);
+        // Runs are back to back: each starts where the last one ended.
+        try testing.expectEqual(chunk.seam_tris.ptr + total, item.tris.ptr);
+        total += item.tris.len;
     }
+    try testing.expectEqual(chunk.seams.len, i);
     try testing.expectEqual(chunk.seam_tris.len, total);
 }
 
+test "drawnSeams: all while alone, none once every neighbour is loaded" {
+    const chunk = try parse(test_data.chunk_bytes);
+    const all = (@as(SeamMask, 1) << @intCast(chunk.seams.len)) - 1;
+    try testing.expectEqual(all, chunk.drawnSeams(LoadedSet{ .coords = &.{chunk.coord} }));
+    const ring = [1]Hex{chunk.coord} ++ chunk.coord.neighbors();
+    try testing.expectEqual(0, chunk.drawnSeams(LoadedSet{ .coords = &ring }));
+}
+
 test "Seam.drawn: once while its owner is away, corners by (q, r) order" {
-    const Loaded = struct {
-        set: []const Hex,
-        pub fn loaded(l: @This(), c: Hex) bool {
-            return Hex.indexOf(l.set, c) != null;
-        }
-    };
+    const Loaded = LoadedSet;
     const a: Hex = .{ .q = 0, .r = 0 };
     const owner: Hex = .{ .q = 1, .r = 0 };
     const also: Hex = .{ .q = 0, .r = 1 };
     var edge = std.mem.zeroes(Seam);
     edge.owner_q = owner.q;
-    try testing.expect(edge.drawn(a, Loaded{ .set = &.{a} }));
-    try testing.expect(!edge.drawn(a, Loaded{ .set = &.{ a, owner } }));
+    try testing.expect(edge.drawn(a, Loaded{ .coords = &.{a} }));
+    try testing.expect(!edge.drawn(a, Loaded{ .coords = &.{ a, owner } }));
     var corner = edge;
     corner.has_also = 1;
     corner.also_r = also.r;
-    try testing.expect(corner.drawn(a, Loaded{ .set = &.{a} }));
+    try testing.expect(corner.drawn(a, Loaded{ .coords = &.{a} }));
     // Both carriers loaded: only the one sorting first draws it.
-    try testing.expect(corner.drawn(a, Loaded{ .set = &.{ a, also } }));
+    try testing.expect(corner.drawn(a, Loaded{ .coords = &.{ a, also } }));
     var mirrored = corner;
     mirrored.also_q = a.q;
     mirrored.also_r = a.r;
-    try testing.expect(!mirrored.drawn(also, Loaded{ .set = &.{ a, also } }));
-    try testing.expect(!corner.drawn(a, Loaded{ .set = &.{ a, also, owner } }));
+    try testing.expect(!mirrored.drawn(also, Loaded{ .coords = &.{ a, also } }));
+    try testing.expect(!corner.drawn(a, Loaded{ .coords = &.{ a, also, owner } }));
 }
 
 test "rejects cell runs that don't tile the tris" {
