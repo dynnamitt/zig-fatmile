@@ -12,6 +12,7 @@ const config = @import("config");
 const hud = @import("render/hud.zig");
 const scene = @import("render/scene.zig");
 const Sky = @import("render/Sky.zig");
+const Shovel = @import("render/Shovel.zig");
 const TerrainStream = @import("TerrainStream.zig");
 
 // Starting size. The window is resizable on both platforms: natively you
@@ -42,6 +43,7 @@ var world: *ecs.world_t = undefined;
 var player: ecs.entity_t = undefined;
 var stream: TerrainStream = undefined;
 var sky: Sky = undefined;
+var shovel: Shovel = undefined;
 var ground: core.ground.Ground = undefined;
 var clock: core.FixedClock = .{};
 /// Walk forward without holding anything: R toggles it (web: the page's
@@ -61,6 +63,8 @@ pub fn main() !void {
 
     sky = try .load();
     defer sky.unload();
+    shovel = try .load();
+    defer shovel.unload();
     stream = try .init(std.heap.c_allocator);
     defer stream.deinit();
     ground = stream.terrain.asGround();
@@ -103,7 +107,9 @@ fn frame() callconv(.c) void {
     rl.clearBackground(rl.getColor(core.palette.background)); // the sky covers it
     var view = game.player.view(world, player, clock.alpha());
     view.eye.y += lift;
-    const draws = scene.draw(scene.camera(view), sky, stream.pieces.items, stream.material);
+    const cam = scene.camera(view);
+    const cell = cellUnderPointer(cam);
+    const draws = scene.draw(cam, sky, stream.pieces.items, stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't
@@ -115,6 +121,20 @@ fn frame() callconv(.c) void {
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
     hud.drawStats(stats, stream.loaded.len, draws, auto_walk, lift);
     hud.drawHint();
+    shovel.draw(cell != null);
+}
+
+/// The cell whose face is under the mouse pointer, within the shovel's reach
+/// (`game.player.reach` from the camera, so the debug lift can put every
+/// cell out of reach), or null.
+fn cellUnderPointer(cam: rl.Camera3D) ?core.Hex {
+    const ray = rl.getScreenToWorldRay(rl.getMousePosition(), cam);
+    const hit = stream.terrain.raycast(vec3(ray.position), vec3(ray.direction), game.player.reach) orelse return null;
+    return stream.terrain.faceAt(hit.x, hit.z);
+}
+
+fn vec3(v: rl.Vector3) core.Vec3 {
+    return .{ .x = v.x, .y = v.y, .z = v.z };
 }
 
 /// Mouse, touch, keyboard and gamepad 0 → the player's intent. Mouse look is

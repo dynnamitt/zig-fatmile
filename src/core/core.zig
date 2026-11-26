@@ -3,6 +3,7 @@
 pub const FixedClock = @import("FixedClock.zig");
 pub const FrameStats = @import("FrameStats.zig");
 pub const palette = @import("palette.zig");
+pub const sprite = @import("sprite.zig");
 pub const sky = @import("sky.zig");
 pub const Vec3 = @import("vec.zig").Vec3;
 pub const Aabb = @import("Aabb.zig");
