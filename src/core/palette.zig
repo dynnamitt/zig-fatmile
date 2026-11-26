@@ -1,4 +1,4 @@
-//! Colours as 0xRRGGBBAA, from the tech-trio.svg palette, so modules that
+//! Colours as 0xRRGGBBAA, so modules that
 //! never import raylib can still name them. web/shell.html repeats the first three.
 const std = @import("std");
 
