@@ -9,6 +9,7 @@ const Vec3 = @import("vec.zig").Vec3;
 const Aabb = @import("Aabb.zig");
 const palette = @import("palette.zig");
 const world = @import("world.zig");
+const sky = @import("sky.zig");
 const ChunkMesh = @This();
 
 /// Edge distance on faces and junction tris: far past any line width.
@@ -17,8 +18,9 @@ pub const no_rim = 1e3;
 pub const Style = struct {
     /// Height that maps to the top of the colour ramp.
     max_height: f32 = world.max_height,
-    /// Direction towards the sun; baked into vertex colours.
-    sun: Vec3 = .{ .x = 0.4, .y = 1, .z = 0.25 },
+    /// Direction towards the sun; baked into vertex colours. The sky draws
+    /// its disc there.
+    sun: Vec3 = sky.sun,
     /// Light on faces turned away from the sun.
     ambient: f32 = 0.55,
 };

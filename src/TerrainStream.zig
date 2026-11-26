@@ -12,8 +12,7 @@ const core = @import("core");
 const terrain_render = @import("render/terrain.zig");
 const TerrainStream = @This();
 
-/// Chunks within 1 chunk-step are loaded; they are freed past 2.
-pub const range: core.streaming.Range = .{ .load = 1, .keep = 2 };
+pub const range = core.streaming.chunk_range;
 /// Most chunks loaded per frame, so a border crossing never hitches.
 pub const loads_per_frame = 2;
 

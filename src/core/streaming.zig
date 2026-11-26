@@ -14,6 +14,11 @@ pub const Range = struct {
     keep: u32,
 };
 
+/// The game's range: 19 chunks round the player's own, freed past 3 steps.
+/// 2 steps keep at least 118 m loaded in every direction from anywhere in
+/// the player's chunk, which `sky.fog_end` relies on (1 step gives 45 m).
+pub const chunk_range: Range = .{ .load = 2, .keep = 3 };
+
 pub const Plan = struct {
     /// Load these, in order (nearest first).
     load: []const Hex,
