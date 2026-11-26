@@ -1,6 +1,7 @@
 //! The mouse pointer: a pixel-art shovel (`shovel.png`, made from
 //! `artwork/showel.svg` by `artwork/shovel-pointer.sh`), blade down-left with
 //! its tip on the pointer. The system cursor is hidden while it is loaded.
+const std = @import("std");
 const rl = @import("raylib");
 const Shovel = @This();
 
@@ -13,6 +14,10 @@ const screen_px_per_scale = 360;
 /// Alpha of the pointer while no cell is in reach under it (placeholder for
 /// a pointer of its own).
 const idle_alpha = 0.4;
+// While a cell is targeted the shovel wiggles: it rocks round the blade tip,
+// wiggle_deg either way, wiggle_hz times a second.
+const wiggle_deg = 12;
+const wiggle_hz = 2.5;
 
 texture: rl.Texture2D,
 
@@ -33,9 +38,14 @@ pub fn unload(s: Shovel) void {
     rl.showCursor();
 }
 
-/// Draws the shovel at the mouse position, faded unless `on_cell` (a cell
-/// face in reach under the pointer). Call last, over the HUD.
+/// Draws the shovel at the mouse position: wiggling round the blade tip while
+/// `on_cell` (a cell face in reach under the pointer), still and faded
+/// otherwise. Call last, over the HUD.
 pub fn draw(s: Shovel, on_cell: bool) void {
     const scale: f32 = @floatFromInt(@max(min_scale, @divTrunc(rl.getScreenHeight(), screen_px_per_scale)));
-    rl.drawTextureEx(s.texture, rl.getMousePosition().subtract(hotspot.scale(scale)), 0, scale, if (on_cell) .white else rl.fade(.white, idle_alpha));
+    const w: f32 = @floatFromInt(s.texture.width);
+    const h: f32 = @floatFromInt(s.texture.height);
+    const m = rl.getMousePosition();
+    const angle: f32 = if (on_cell) wiggle_deg * @as(f32, @floatCast(@sin(std.math.tau * wiggle_hz * rl.getTime()))) else 0;
+    rl.drawTexturePro(s.texture, .{ .x = 0, .y = 0, .width = w, .height = h }, .{ .x = m.x, .y = m.y, .width = w * scale, .height = h * scale }, hotspot.scale(scale), angle, if (on_cell) .white else rl.fade(.white, idle_alpha));
 }
