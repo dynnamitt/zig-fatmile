@@ -330,6 +330,12 @@ test "Seam.drawn: once while its owner is away, corners by (q, r) order" {
     try testing.expect(!corner.drawn(a, Loaded{ .coords = &.{ a, also, owner } }));
 }
 
+test "rejects more seams than a SeamMask holds" {
+    var copy = test_data.chunk_bytes.*;
+    std.mem.writeInt(u32, copy[24..28], max_seams + 1, .little);
+    try testing.expectError(error.TooManySeams, parse(&copy));
+}
+
 test "rejects cell runs that don't tile the tris" {
     var copy = test_data.chunk_bytes.*;
     // Bump the second cell's first_tri, then re-sign the payload.

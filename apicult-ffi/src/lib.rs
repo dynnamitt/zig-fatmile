@@ -173,25 +173,30 @@ struct SeamGroup {
 /// walking the ring. Unlike apicult's, each group keeps quads and junctions
 /// apart, so the quads stay in pairs for the line shader.
 ///
-/// Ring cells are entangled, so `owned_tris_into(h, false)` gives them no
-/// face and only the quads towards this chunk's own (unentangled) cells:
-/// a quad touches `owner` and `coord`, never a third chunk. Only junctions
-/// need their vertices looked up, and their first vertex is `h`'s own corner.
+/// Like apicult, every vertex of every tri is looked up, so the grouping
+/// rests on what each tri touches, never on assumptions about the layout;
+/// a vertex that is no corner nearby is an error. The lookup is cheap: each
+/// ring cell's neighbourhood corners (7 cells × 6) are computed once, not
+/// per vertex.
 ///
 /// @returns {Result<Vec<SeamGroup>, ChunkError>} the groups, or the ring
 /// cell whose tris broke those rules.
 fn seams(layout: &HGridLayout, coord: Hex, r: u32) -> Result<Vec<SeamGroup>, ChunkError> {
-    // A junction vertex is bit-for-bit a `vertex()` of ring cell `h` or a neighbour.
-    let chunk_of = |h: Hex, v: &Vec3| {
-        std::iter::once(h)
-            .chain(h.all_neighbors())
-            .find(|&n| (0..6).any(|i| layout.vertex(n, i) == Some(*v)))
-            .map(|n| n.to_lower_res(r))
-            .ok_or(ChunkError::StrayVertex(h))
-    };
     // Every ring cell's tris, tagged with (owner, also, is_quad).
     let tagged = layout.center().ring(r + 1).map(|h| {
         let owner = h.to_lower_res(r);
+        // A seam vertex is bit-for-bit a `vertex()` of ring cell `h` or a neighbour.
+        let corners: Vec<(Vec3, Hex)> = std::iter::once(h)
+            .chain(h.all_neighbors())
+            .flat_map(|n| (0..6).filter_map(move |i| layout.vertex(n, i).map(|v| (v, n))))
+            .collect();
+        let chunk_of = |v: &Vec3| {
+            corners
+                .iter()
+                .find(|(c, _)| c == v)
+                .map(|&(_, n)| n.to_lower_res(r))
+                .ok_or(ChunkError::StrayVertex(h))
+        };
         let mut tris = Vec::new();
         let (faces, quads, _) = layout.owned_tris_into(h, false, &mut tris);
         if faces != 0 {
@@ -200,15 +205,8 @@ fn seams(layout: &HGridLayout, coord: Hex, r: u32) -> Result<Vec<SeamGroup>, Chu
         tris.into_iter()
             .enumerate()
             .map(|(i, t)| {
-                let also = if i < quads {
-                    None
-                } else {
-                    t[1..]
-                        .iter()
-                        .map(|v| chunk_of(h, v))
-                        .find(|c| c.as_ref().map_or(true, |&c| c != coord && c != owner))
-                        .transpose()?
-                };
+                let chunks = t.iter().map(chunk_of).collect::<Result<Vec<_>, _>>()?;
+                let also = chunks.into_iter().find(|&c| c != coord && c != owner);
                 Ok((owner, also, i < quads, t))
             })
             .collect::<Result<Vec<_>, _>>()

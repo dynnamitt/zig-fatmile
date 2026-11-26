@@ -46,6 +46,9 @@ broken: std.ArrayList(core.Hex) = .empty,
 pieces: std.ArrayList(terrain_render.Piece) = .empty,
 /// Set when the loaded set changed and `pieces` or a seam mesh is out of date.
 stale: bool = false,
+/// Whether the current run of failed refreshes was logged, so a lasting
+/// shortage logs once, not every frame.
+refresh_failure_logged: bool = false,
 material: rl.Material,
 
 /// Call `deinit` before closing the window.
@@ -80,14 +83,21 @@ pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
         std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
         s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
     };
-    if (plan.load.len > 0 or plan.unload.len > 0) s.stale = true;
-    if (s.stale) s.refresh() catch std.log.err("out of memory: terrain seams or draw list are behind, retrying", .{});
+    if (!s.stale) return;
+    if (s.refresh()) {
+        s.refresh_failure_logged = false;
+    } else |_| if (!s.refresh_failure_logged) {
+        std.log.err("out of memory: some terrain seams or the draw list are behind; retrying each frame", .{});
+        s.refresh_failure_logged = true;
+    }
 }
 
 /// Rebuilds each chunk's seam mesh whose drawn seams changed, then `pieces`.
-/// A chunk whose seam mesh fails to build keeps its old one (its own seams,
-/// so still valid) and `stale` stays set, so the next `update` retries. If
-/// `pieces` can't be rebuilt it is left empty: it may name freed meshes.
+/// A chunk whose seam mesh fails to build draws no seams until a retry
+/// works: its old mesh may hold seams a loaded owner now draws itself, and
+/// drawing both would z-fight. `stale` then stays set, so the next `update`
+/// retries. If `pieces` can't be rebuilt it is left empty: it may name
+/// freed meshes.
 fn refresh(s: *TerrainStream) error{OutOfMemory}!void {
     var complete = true;
     const set: core.Chunk.LoadedSet = .{ .coords = s.loaded.items(.coord) };
@@ -96,18 +106,19 @@ fn refresh(s: *TerrainStream) error{OutOfMemory}!void {
     for (s.loaded.items(.chunk), s.loaded.items(.seam_mask), seam_meshes, seam_bounds) |chunk, *mask, *mesh, *bounds| {
         const want = chunk.drawnSeams(set);
         if (want == mask.*) continue;
-        const new: ?rl.Mesh, const new_bounds: core.Aabb = if (want == 0) .{ null, .empty } else blk: {
-            const cpu = core.ChunkMesh.buildSeams(s.gpa, chunk, want, .{}) catch {
-                complete = false;
-                continue;
-            };
-            defer cpu.deinit(s.gpa);
-            break :blk .{ terrain_render.upload(cpu), cpu.bounds() };
-        };
         if (mesh.*) |old| rl.unloadMesh(old);
+        mask.* = 0;
+        mesh.* = null;
+        bounds.* = .empty;
+        if (want == 0) continue;
+        const cpu = core.ChunkMesh.buildSeams(s.gpa, chunk, want, .{}) catch {
+            complete = false;
+            continue;
+        };
+        defer cpu.deinit(s.gpa);
         mask.* = want;
-        mesh.* = new;
-        bounds.* = new_bounds;
+        mesh.* = terrain_render.upload(cpu);
+        bounds.* = cpu.bounds();
     }
 
     s.pieces.clearRetainingCapacity();
@@ -142,6 +153,7 @@ fn load(s: *TerrainStream, coord: core.Hex) !void {
     try s.terrain.insert(chunk);
     // Its seam mesh comes from the next `refresh`.
     s.loaded.appendAssumeCapacity(.{ .coord = coord, .bytes = bytes, .chunk = chunk, .mesh = terrain_render.upload(cpu), .bounds = cpu.bounds() });
+    s.stale = true;
 }
 
 /// Frees chunk `i`. `pieces` still names its meshes until the next `refresh`.
