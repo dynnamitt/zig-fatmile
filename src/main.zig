@@ -107,7 +107,9 @@ fn frame() callconv(.c) void {
     rl.clearBackground(rl.getColor(core.palette.background)); // the sky covers it
     var view = game.player.view(world, player, clock.alpha());
     view.eye.y += lift;
-    const draws = scene.draw(scene.camera(view), sky, stream.pieces.items, stream.material);
+    const cam = scene.camera(view);
+    const cell = cellUnderPointer(cam);
+    const draws = scene.draw(cam, sky, stream.pieces.items, stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.
     // Flush raylib's last draw batch first so it counts. GPU time isn't
@@ -119,7 +121,17 @@ fn frame() callconv(.c) void {
     stats.add(rl.getFrameTime(), @floatCast(rl.getTime() - work_start));
     hud.drawStats(stats, stream.loaded.len, draws, auto_walk, lift);
     hud.drawHint();
-    shovel.draw();
+    shovel.draw(cell != null);
+}
+
+/// The cell whose face is under the mouse pointer, within the shovel's reach
+/// (`game.player.reach` from the camera), or null.
+fn cellUnderPointer(cam: rl.Camera3D) ?core.Hex {
+    const ray = rl.getScreenToWorldRay(rl.getMousePosition(), cam);
+    const origin: core.Vec3 = .{ .x = ray.position.x, .y = ray.position.y, .z = ray.position.z };
+    const dir: core.Vec3 = .{ .x = ray.direction.x, .y = ray.direction.y, .z = ray.direction.z };
+    const hit = stream.terrain.raycast(origin, dir, game.player.reach) orelse return null;
+    return stream.terrain.faceAt(hit.x, hit.z);
 }
 
 /// Mouse, touch, keyboard and gamepad 0 → the player's intent. Mouse look is

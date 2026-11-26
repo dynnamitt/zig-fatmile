@@ -10,6 +10,9 @@ const hotspot = rl.Vector2.init(0, 28);
 // screen_px_per_scale of window height, at least min_scale.
 const min_scale = 2;
 const screen_px_per_scale = 360;
+/// Alpha of the pointer while no cell is in reach under it (placeholder for
+/// a pointer of its own).
+const idle_alpha = 0.4;
 
 texture: rl.Texture2D,
 
@@ -30,8 +33,9 @@ pub fn unload(s: Shovel) void {
     rl.showCursor();
 }
 
-/// Draws the shovel at the mouse position. Call last, over the HUD.
-pub fn draw(s: Shovel) void {
+/// Draws the shovel at the mouse position, faded unless `on_cell` (a cell
+/// face in reach under the pointer). Call last, over the HUD.
+pub fn draw(s: Shovel, on_cell: bool) void {
     const scale: f32 = @floatFromInt(@max(min_scale, @divTrunc(rl.getScreenHeight(), screen_px_per_scale)));
-    rl.drawTextureEx(s.texture, rl.getMousePosition().subtract(hotspot.scale(scale)), 0, scale, .white);
+    rl.drawTextureEx(s.texture, rl.getMousePosition().subtract(hotspot.scale(scale)), 0, scale, if (on_cell) .white else rl.fade(.white, idle_alpha));
 }
