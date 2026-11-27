@@ -253,11 +253,8 @@ test "seam mesh: each group's tris, lines in their quads, none in their junction
         for (chunk.seam_keys) |k| want += @intFromBool(k.eql(key));
         try testing.expectEqual(3 * want, m.vertexCount());
         total += want;
-        for (0..m.vertexCount()) |v| {
-            const r = m.rims[v * 2 ..][0..2];
-            // A corner group holds only junctions; quads have lines on a rim.
-            if (key.also() != null) try testing.expectEqual(no_rim, r[0]);
-        }
+        // A corner group holds only junctions: no lines.
+        if (key.also() != null) for (0..m.vertexCount()) |v| try testing.expectEqual(no_rim, m.rims[v * 2]);
     }
     try testing.expectEqual(chunk.seam_tris.len, total);
 

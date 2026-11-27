@@ -138,7 +138,8 @@ pub const Error = error{ TooShort, BadMagic, UnsupportedVersion, PayloadLength, 
 
 /// Reads a chunk in place and checks it: magic, version, lengths, hash,
 /// `tri_sequence` tris per cell, ring counts that tile the seam tris with
-/// whole quads, and at most `max_seams` distinct seam keys.
+/// whole quads under one key per ring cell, and at most `max_seams` distinct
+/// seam keys.
 /// @param bytes {[]const u8} what `ac_chunk` returned; must outlive the chunk.
 /// @returns {Error!Chunk} views into `bytes`.
 pub fn parse(bytes: []const u8) Error!Chunk {
@@ -182,6 +183,13 @@ pub fn parse(bytes: []const u8) Error!Chunk {
         seam_total += c.triCount();
     }
     if (seam_total != n_seam_tris) return error.BadSeamRun;
+    // A ring cell's quads join it to one own cell: one key, no corner
+    // (`ChunkMesh.buildSeams` keeps the pairs whole on that).
+    var it = chunk.ringIterator();
+    while (it.next()) |item| {
+        const quad_keys = item.keys[0..item.cell.n_quad_tris];
+        for (quad_keys) |k| if (!k.eql(quad_keys[0]) or k.also() != null) return error.BadSeamRun;
+    }
     for (chunk.seam_keys) |k| {
         if (chunk.groupOf(k) != null) continue;
         if (chunk.n_groups == max_seams) return error.TooManySeams;
@@ -245,7 +253,7 @@ pub fn ringIterator(chunk: *const Chunk) RingIterator {
 }
 
 /// The `tri_sequence` of own cell `i` (an index into `cells`): face first.
-pub fn cellTris(chunk: Chunk, i: usize) []align(1) const Tri {
+pub fn cellTris(chunk: *const Chunk, i: usize) []align(1) const Tri {
     return chunk.tris[i * tri_sequence ..][0..tri_sequence];
 }
 
@@ -361,26 +369,66 @@ test "SeamKey.drawn follows apicult's table (testdata/entangled_seam_drawn.tsv)"
     try testing.expect(rows >= 10);
 }
 
+/// The bytes of `item`'s keys in `copy`, the buffer `chunk` was parsed from.
+fn keyBytes(copy: []u8, item: RingIterator.Item) []u8 {
+    const at = @intFromPtr(item.keys.ptr) - @intFromPtr(copy.ptr);
+    return copy[at..][0 .. item.keys.len * @sizeOf(SeamKey)];
+}
+
+fn resign(copy: []u8) void {
+    std.mem.writeInt(u64, copy[32..40], std.hash.Fnv1a_64.hash(copy[header_len..]), .little);
+}
+
 test "rejects more distinct seam keys than a SeamMask holds" {
     var copy = test_data.chunk_bytes.*;
     const chunk = try parse(&copy);
-    // Give the first max_seams + 1 seam tris their own owner, then re-sign.
-    const keys_at = @intFromPtr(chunk.seam_keys.ptr) - @intFromPtr(&copy);
-    for (0..max_seams + 1) |i| std.mem.writeInt(i32, copy[keys_at + i * 16 ..][0..4], 1000 + @as(i32, @intCast(i)), .little);
-    std.mem.writeInt(u64, copy[32..40], std.hash.Fnv1a_64.hash(copy[header_len..]), .little);
+    // Give max_seams + 1 ring cells their own owner (in `owner_q` and
+    // `also_q`, so quads stay corner-free).
+    var it = chunk.ringIterator();
+    var owners: i32 = 0;
+    while (owners <= max_seams) {
+        const item = it.next().?;
+        if (item.keys.len == 0) continue;
+        owners += 1;
+        const keys = keyBytes(&copy, item);
+        for (0..item.keys.len) |t| {
+            std.mem.writeInt(i32, keys[t * 16 ..][0..4], 1000 + owners, .little);
+            std.mem.writeInt(i32, keys[t * 16 + 8 ..][0..4], 1000 + owners, .little);
+        }
+    }
+    resign(&copy);
     try testing.expectError(error.TooManySeams, parse(&copy));
+}
+
+test "rejects a ring cell whose quad tris don't share one key" {
+    var copy = test_data.chunk_bytes.*;
+    const chunk = try parse(&copy);
+    var it = chunk.ringIterator();
+    const item = while (it.next()) |item| {
+        if (item.cell.n_quad_tris > 0) break item;
+    } else unreachable;
+    // Give its last quad tri another owner.
+    const last = (item.cell.n_quad_tris - 1) * @as(usize, 16);
+    std.mem.writeInt(i32, keyBytes(&copy, item)[last..][0..4], 1000, .little);
+    resign(&copy);
+    try testing.expectError(error.BadSeamRun, parse(&copy));
 }
 
 test "rejects tris that aren't a tri_sequence per cell" {
     var copy = test_data.chunk_bytes.*;
-    // One cell fewer in the header; move nothing, so the lengths still need fixing.
+    // One tri fewer: the lengths no longer add up.
     std.mem.writeInt(u32, copy[20..24], 14 * 127 - 1, .little);
-    std.mem.writeInt(u32, copy[24..28], 6 * 7, .little);
     try testing.expectError(error.PayloadLength, parse(&copy));
+    // 9 cells fewer and 4 tris more: the same bytes (9·16 = 4·36), same hash,
+    // but not 14 tris per cell.
+    copy = test_data.chunk_bytes.*;
+    std.mem.writeInt(u32, copy[16..20], 127 - 9, .little);
+    std.mem.writeInt(u32, copy[20..24], 14 * 127 + 4, .little);
+    try testing.expectError(error.BadCellRun, parse(&copy));
     var ring_bad = test_data.chunk_bytes.*;
     const chunk = try parse(&ring_bad);
     const ring_at = @intFromPtr(chunk.ring.ptr) - @intFromPtr(&ring_bad);
     std.mem.writeInt(u16, ring_bad[ring_at..][0..2], 1, .little); // an odd quad count
-    std.mem.writeInt(u64, ring_bad[32..40], std.hash.Fnv1a_64.hash(ring_bad[header_len..]), .little);
+    resign(&ring_bad);
     try testing.expectError(error.BadSeamRun, parse(&ring_bad));
 }

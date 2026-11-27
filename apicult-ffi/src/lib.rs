@@ -372,71 +372,49 @@ mod tests {
         );
     }
 
+    /// `ac_chunk` for a chunk of `WORLD`: its pointer, `out_len` and `out_err`.
+    fn call(coord: Hex, edits: *const AcEdit, n_edits: usize) -> (*mut u8, usize, u32) {
+        let (mut len, mut err) = (99, 99);
+        let w = WORLD;
+        let ptr = unsafe {
+            ac_chunk(
+                w.chunk_radius,
+                w.hex_size,
+                w.max_height,
+                w.height_seed,
+                w.radius_seed,
+                coord.x,
+                coord.y,
+                edits,
+                n_edits,
+                &mut len,
+                &mut err,
+            )
+        };
+        (ptr, len, err)
+    }
+
     #[test]
     fn ac_chunk_round_trip() {
-        let (mut len, mut err) = (0, 99);
-        let w = WORLD;
-        let c = Hex::new(2, -1).to_higher_res(w.chunk_radius); // the chunk's centre cell
+        let coord = Hex::new(2, -1);
+        let c = coord.to_higher_res(WORLD.chunk_radius); // the chunk's centre cell
         let edit = AcEdit {
             q: c.x,
             r: c.y,
             channel: AC_SIZE,
             value: 1.0,
         };
-        let (rs, hs, mh) = (w.radius_seed, w.height_seed, w.max_height);
-        let ptr = unsafe {
-            ac_chunk(
-                w.chunk_radius,
-                w.hex_size,
-                mh,
-                hs,
-                rs,
-                2,
-                -1,
-                &edit,
-                1,
-                &mut len,
-                &mut err,
-            )
-        };
+        let (ptr, len, err) = call(coord, &edit, 1);
         assert!(!ptr.is_null() && err == 0);
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
         unsafe { ac_free(ptr, len) };
-        assert_eq!(bytes, chunk_bytes(WORLD, Hex::new(2, -1), &[edit]).unwrap());
+        assert_eq!(bytes, chunk_bytes(WORLD, coord, &[edit]).unwrap());
 
         let bad = AcEdit { channel: 9, ..edit };
-        let ptr = unsafe {
-            ac_chunk(
-                w.chunk_radius,
-                w.hex_size,
-                mh,
-                hs,
-                rs,
-                2,
-                -1,
-                &bad,
-                1,
-                &mut len,
-                &mut err,
-            )
-        };
+        let (ptr, len, err) = call(coord, &bad, 1);
         assert!(ptr.is_null() && len == 0 && err == AcError::BadChannel as u32);
-        let none = std::ptr::null();
-        let ptr = unsafe {
-            ac_chunk(
-                w.chunk_radius,
-                w.hex_size,
-                mh,
-                hs,
-                rs,
-                0,
-                0,
-                none,
-                0,
-                &mut len,
-                &mut err,
-            )
-        };
+
+        let (ptr, len, err) = call(Hex::ZERO, std::ptr::null(), 0);
         assert!(!ptr.is_null() && err == 0);
         unsafe { ac_free(ptr, len) };
     }
