@@ -191,11 +191,11 @@ test "spiral is nearest first, unique and complete" {
 
 test "matches the generator on a real chunk: centres, chunk of each cell" {
     const chunk = try Chunk.parse(test_chunk.chunk_bytes);
-    for (chunk.cells) |cell| {
+    for (chunk.cells, 0..) |cell, i| {
         const h = cell.hex();
         try testing.expectEqual(chunk.coord, h.toLowerRes(world.chunk_radius));
         // The first face tri's first corner is the cell centre.
-        const centre = chunk.tris[cell.first_tri].a;
+        const centre = chunk.cellTris(i)[0].a;
         const w = h.toWorld(world.hex_size);
         try testing.expectApproxEqAbs(w[0], centre.x, 1e-4);
         try testing.expectApproxEqAbs(w[1], centre.z, 1e-4);

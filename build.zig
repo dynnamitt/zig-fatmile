@@ -51,6 +51,8 @@ pub fn build(b: *std.Build) !void {
     });
     // Test fixture: chunk 0,0 as apicult-ffi writes it (src/core/test_data.zig).
     core_mod.addAnonymousImport("chunk_0_0", .{ .root_source_file = b.path("src/core/testdata/chunk_0_0.bin") });
+    // apicult's seam draw table, which apicult-ffi keeps current (`drawn_table_is_current`).
+    core_mod.addAnonymousImport("entangled_seam_drawn", .{ .root_source_file = b.path("src/core/testdata/entangled_seam_drawn.tsv") });
 
     const game_mod = b.createModule(.{
         .root_source_file = b.path("src/game/game.zig"),

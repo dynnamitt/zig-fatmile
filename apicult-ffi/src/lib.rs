@@ -1,39 +1,38 @@
-//! C ABI over apicult-desigual's on-demand chunk generator.
+//! C ABI over apicult-desigual's chunk functions: no geometry or grouping
+//! logic of its own (apicult-desigual-rs#38 rule 1). `ac_chunk` builds chunk
+//! `(q, r)` from noise plus the caller's stored edits and copies apicult's
+//! outputs, in apicult's order, into one HXCK v4 buffer that
+//! `src/core/Chunk.zig` reads in place:
 //!
-//! `ac_chunk` builds chunk `(q, r)` of an unbounded world and returns it as
-//! HXCK v3 bytes, the format `src/core/Chunk.zig` reads. v1 is what apicult
-//! wrote as files up to e59947; v2 dropped its partition-line segments (the
-//! terrain shader draws the lines); v3 adds the chunk's seams:
+//! | part | layout (little-endian) | from apicult |
+//! |---|---|---|
+//! | header (40 B) | `"HXCK"`, `u32 4`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 n_ring`, `u32 n_seam_tris`, `u64 hash` | |
+//! | cells | `n_cells × {i32 q, i32 r, f32 height, f32 radius}` | `own_cell_states` |
+//! | tris | `n_tris × 9 f32`, 14 per cell: 6 face, 6 gap-quad (pairs), 2 junction | `own_tris` |
+//! | ring | `n_ring × {u16 n_quad_tris, u16 n_junction_tris}` | `entangled_seam_counts` |
+//! | seam keys | `n_seam_tris × {i32 owner_q, i32 owner_r, i32 also_q, i32 also_r}`; no `also` repeats the owner | `entangled_seam_keys` |
+//! | seam tris | `n_seam_tris × 9 f32`: per ring cell its quad tris (pairs), then its junction tris | `entangled_seam_tris` |
 //!
-//! | part | layout (little-endian) |
-//! |---|---|
-//! | header (40 B) | `"HXCK"`, `u32 3`, `i32 q`, `i32 r`, `u32 n_cells`, `u32 n_tris`, `u32 n_seams`, `u32 n_seam_tris`, `u64 hash` |
-//! | cells | `n_cells × {i32 q, i32 r, f32 height, f32 radius, u32 first_tri, u8 n_quads, u8 n_junctions, u16 0}` |
-//! | tris | `n_tris × 9 f32`: per cell 6 face tris (centre, rim corner, rim corner), then 2 per owned gap quad, then junction tris |
-//! | seams | `n_seams × {i32 owner_q, i32 owner_r, i32 also_q, i32 also_r, u16 n_quad_tris, u16 n_junction_tris, u8 has_also, u8 0, u16 0}` |
-//! | seam tris | `n_seam_tris × 9 f32`: per seam its gap-quad tris (pairs, as in the owned stream), then its junction tris |
-//!
-//! A seam is apicult's [`apicult_desigual::Seam`]: triangles a neighbour
-//! chunk (`owner`) owns that touch this one, copied so this chunk can draw
-//! them while the owner isn't loaded (rule: `Seam::drawn`). `also` is the
-//! third chunk a corner junction touches. The grouping mirrors
-//! `NoiseWorld::chunk`; a test checks it against that.
-//!
-//! `hash` is FNV-1a 64 over every byte after the header. The cells and tris
-//! are what [`apicult_desigual::NoiseWorld`] puts in a chunk's owned stream.
+//! `hash` is FNV-1a 64 over every byte after the header: the format is read
+//! in place, so it guards against a truncated or garbled buffer.
 
-use apicult_desigual::{HGridLayout, HGridSettings};
+use apicult_desigual::{
+    ChunkError, EntangledSeam, HGridLayout, HGridSettings, NoiseType, Override, entangled_seam_keys,
+};
 use glam::Vec3;
-use hexx::{Hex, shapes};
+use hexx::Hex;
 
 const MAGIC: &[u8; 4] = b"HXCK";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER_LEN: usize = 40;
-const CELL_LEN: usize = 24;
 #[cfg(test)]
-const SEAM_LEN: usize = 24;
-/// Header offsets of the fields written after the cells are known.
-const N_CELLS_AT: usize = 16;
+const CELL_LEN: usize = 16;
+#[cfg(test)]
+const RING_LEN: usize = 4;
+#[cfg(test)]
+const KEY_LEN: usize = 16;
+#[cfg(test)]
+const TRI_LEN: usize = 36;
 const HASH_AT: usize = 32;
 
 /// The world settings zig-fatmile chooses; every other `HGridSettings` field
@@ -60,186 +59,133 @@ pub const WORLD: World = World {
     radius_seed: 137,
 };
 
-/// Why a chunk couldn't be built. Each is a broken invariant of apicult's
-/// layout; `ac_chunk` reports it as null, so the game skips the chunk
-/// instead of aborting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChunkError {
-    /// A cell of the chunk is missing from its own layout.
-    MissingCell(Hex),
-    /// A cell's run doesn't start with its 6 face tris, or a ring cell has a face.
-    BadFaces(Hex),
-    /// A seam junction's vertex is no corner of its ring cell or a neighbour.
-    StrayVertex(Hex),
-    /// A count doesn't fit its field in the format.
-    TooMany(&'static str),
-}
-
-/// `n` as the format's narrower integer, or `TooMany(what)`.
-fn fit<T: TryFrom<usize>>(n: usize, what: &'static str) -> Result<T, ChunkError> {
-    T::try_from(n).map_err(|_| ChunkError::TooMany(what))
-}
-
-/// Builds one chunk and encodes it.
-///
-/// @param world {World} — the world's settings, the same for every chunk.
-/// @param coord {Hex} — the chunk's coordinate on the chunk lattice.
-/// @returns {Result<Vec<u8>, ChunkError>} the chunk as HXCK v3 bytes (format
-/// in the module docs), or which layout invariant broke.
-pub fn chunk_bytes(world: World, coord: Hex) -> Result<Vec<u8>, ChunkError> {
-    let settings = HGridSettings {
-        nominal_hex_radius: world.hex_size,
-        max_height: world.max_height,
-        height_noise_seed: world.height_seed,
-        radius_noise_seed: world.radius_seed,
-        ..HGridSettings::default()
-    };
-    let layout = HGridLayout::for_chunk(&settings, coord, world.chunk_radius);
-    let mut tris: Vec<[Vec3; 3]> = Vec::new();
-    // Header with the cell count and hash still zero; both are patched below.
-    let mut out: Vec<u8> = [
-        MAGIC.as_slice(),
-        &VERSION.to_le_bytes(),
-        &coord.x.to_le_bytes(),
-        &coord.y.to_le_bytes(),
-        &[0; 24],
-    ]
-    .concat();
-    for h in shapes::hexagon(layout.center(), world.chunk_radius) {
-        let cell = layout.cell(&h).ok_or(ChunkError::MissingCell(h))?;
-        let first: u32 = fit(tris.len(), "tris")?;
-        let (faces, quads, junctions) = layout.owned_tris_into(h, false, &mut tris);
-        if faces != 6 {
-            return Err(ChunkError::BadFaces(h)); // own cells always own their face fan
-        }
-        out.extend_from_slice(&h.x.to_le_bytes());
-        out.extend_from_slice(&h.y.to_le_bytes());
-        out.extend_from_slice(&cell.height.to_le_bytes());
-        out.extend_from_slice(&cell.radius.to_le_bytes());
-        out.extend_from_slice(&first.to_le_bytes());
-        out.extend_from_slice(&[fit(quads / 2, "quads")?, fit(junctions, "junctions")?, 0, 0]);
+impl World {
+    fn settings(self) -> HGridSettings {
+        let mut g = HGridSettings {
+            nominal_hex_radius: self.hex_size,
+            max_height: self.max_height,
+            ..HGridSettings::default()
+        };
+        g.height_noise.seed = self.height_seed;
+        g.radius_noise.seed = self.radius_seed;
+        g
     }
-    let n_cells = (out.len() - HEADER_LEN) / CELL_LEN;
-    let seams = seams(&layout, coord, world.chunk_radius)?;
-    let n_seam_tris: usize = seams
+}
+
+/// One stored edit, as the caller passes it: the final value of one channel
+/// of cell `(q, r)` (apicult's `Override`, D13: absolute, not an offset).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcEdit {
+    pub q: i32,
+    pub r: i32,
+    /// `AC_HEIGHT` or `AC_SIZE`.
+    pub channel: u32,
+    pub value: f32,
+}
+
+pub const AC_HEIGHT: u32 = 0;
+pub const AC_SIZE: u32 = 1;
+
+/// Why `ac_chunk` returned null, as written to its `out_err`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcError {
+    None = 0,
+    /// apicult's `ChunkError::OverrideOutsideChunk`.
+    EditOutsideChunk = 1,
+    /// apicult's `ChunkError::NonFiniteOverride`.
+    NonFiniteEdit = 2,
+    /// apicult's `ChunkError::TooFarFromOrigin`.
+    TooFarFromOrigin = 3,
+    /// An edit's `channel` is neither `AC_HEIGHT` nor `AC_SIZE`.
+    BadChannel = 4,
+    /// A count doesn't fit its field in the format.
+    TooMany = 5,
+}
+
+impl From<ChunkError> for AcError {
+    fn from(e: ChunkError) -> Self {
+        match e {
+            ChunkError::OverrideOutsideChunk(_) => Self::EditOutsideChunk,
+            ChunkError::NonFiniteOverride(_) => Self::NonFiniteEdit,
+            ChunkError::TooFarFromOrigin(_) => Self::TooFarFromOrigin,
+        }
+    }
+}
+
+fn overrides(edits: &[AcEdit]) -> Result<Vec<Override>, AcError> {
+    edits
         .iter()
-        .map(|s| s.quads.len() + s.junctions.len())
-        .sum();
-    let counts = [n_cells, tris.len(), seams.len(), n_seam_tris]
-        .map(|n| fit::<u32>(n, "header counts").map(u32::to_le_bytes))
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    out[N_CELLS_AT..][..16].copy_from_slice(&counts.concat());
+        .map(|e| {
+            let channel = match e.channel {
+                AC_HEIGHT => NoiseType::Height,
+                AC_SIZE => NoiseType::Size,
+                _ => return Err(AcError::BadChannel),
+            };
+            Ok((channel, Hex::new(e.q, e.r), e.value))
+        })
+        .collect()
+}
+
+fn fit<T: TryFrom<usize>>(n: usize) -> Result<T, AcError> {
+    T::try_from(n).map_err(|_| AcError::TooMany)
+}
+
+fn put_tris(out: &mut Vec<u8>, tris: &[[Vec3; 3]]) {
     out.extend(
         tris.iter()
             .flatten()
             .flat_map(|v| v.to_array())
             .flat_map(f32::to_le_bytes),
     );
-    for s in &seams {
-        let also = s.also.unwrap_or(Hex::ZERO);
-        [s.owner.x, s.owner.y, also.x, also.y]
-            .iter()
-            .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        out.extend_from_slice(&fit::<u16>(s.quads.len(), "seam quads")?.to_le_bytes());
-        out.extend_from_slice(&fit::<u16>(s.junctions.len(), "seam junctions")?.to_le_bytes());
-        out.extend_from_slice(&[u8::from(s.also.is_some()), 0, 0, 0]);
+}
+
+/// Builds one chunk and encodes it (format in the module docs).
+///
+/// @param world {World} — the world's settings, the same for every chunk.
+/// @param coord {Hex} — the chunk's coordinate on the chunk lattice.
+/// @param edits {&[AcEdit]} — the stored edits of the chunk's own cells and
+///   its entangled ring.
+/// @returns {Result<Vec<u8>, AcError>} the HXCK v4 bytes, or why not.
+pub fn chunk_bytes(world: World, coord: Hex, edits: &[AcEdit]) -> Result<Vec<u8>, AcError> {
+    let r = world.chunk_radius;
+    let layout = HGridLayout::for_chunk(&world.settings(), coord, r, &overrides(edits)?)?;
+    let cells = layout.own_cell_states();
+    let tris = layout.own_tris();
+    let ring = layout.entangled_seam_counts();
+    let keys = entangled_seam_keys(coord, r)?;
+    let seam_tris = layout.entangled_seam_tris();
+
+    let counts = [cells.len(), tris.len(), ring.len(), seam_tris.len()];
+    let mut out: Vec<u8> = [MAGIC.as_slice(), &VERSION.to_le_bytes()].concat();
+    out.extend_from_slice(&coord.x.to_le_bytes());
+    out.extend_from_slice(&coord.y.to_le_bytes());
+    for n in counts {
+        out.extend_from_slice(&fit::<u32>(n)?.to_le_bytes());
     }
-    let seam_tris = seams
-        .iter()
-        .flat_map(|s| s.quads.iter().chain(&s.junctions));
-    out.extend(
-        seam_tris
-            .flatten()
-            .flat_map(|v| v.to_array())
-            .flat_map(f32::to_le_bytes),
-    );
+    out.extend_from_slice(&[0; 8]); // hash, patched below
+    for c in &cells {
+        out.extend_from_slice(&c.hex.x.to_le_bytes());
+        out.extend_from_slice(&c.hex.y.to_le_bytes());
+        out.extend_from_slice(&c.height.to_le_bytes());
+        out.extend_from_slice(&c.radius.to_le_bytes());
+    }
+    put_tris(&mut out, &tris);
+    for &(quads, junctions) in &ring {
+        out.extend_from_slice(&fit::<u16>(quads)?.to_le_bytes());
+        out.extend_from_slice(&fit::<u16>(junctions)?.to_le_bytes());
+    }
+    for &EntangledSeam { owner, also } in &keys {
+        let also = also.unwrap_or(owner);
+        for v in [owner.x, owner.y, also.x, also.y] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    put_tris(&mut out, &seam_tris);
     let hash = fnv1a64(&out[HEADER_LEN..]);
     out[HASH_AT..][..8].copy_from_slice(&hash.to_le_bytes());
     Ok(out)
-}
-
-/// One seam group, split into its gap-quad tris and its junction tris.
-struct SeamGroup {
-    owner: Hex,
-    also: Option<Hex>,
-    quads: Vec<[Vec3; 3]>,
-    junctions: Vec<[Vec3; 3]>,
-}
-
-/// The seams of chunk `coord`, grouped exactly as apicult's
-/// `NoiseWorld::chunk` groups them (src/chunk.rs at the pinned rev): every
-/// tri a ring cell owns, keyed by `(owner, also)`, in first-seen order
-/// walking the ring. Unlike apicult's, each group keeps quads and junctions
-/// apart, so the quads stay in pairs for the line shader.
-///
-/// Like apicult, every vertex of every tri is looked up, so the grouping
-/// rests on what each tri touches, never on assumptions about the layout;
-/// a vertex that is no corner nearby is an error. The lookup is cheap: each
-/// ring cell's neighbourhood corners (7 cells × 6) are computed once, not
-/// per vertex.
-///
-/// @returns {Result<Vec<SeamGroup>, ChunkError>} the groups, or the ring
-/// cell whose tris broke those rules.
-fn seams(layout: &HGridLayout, coord: Hex, r: u32) -> Result<Vec<SeamGroup>, ChunkError> {
-    // Every ring cell's tris, tagged with (owner, also, is_quad).
-    let tagged = layout.center().ring(r + 1).map(|h| {
-        let owner = h.to_lower_res(r);
-        // A seam vertex is bit-for-bit a `vertex()` of ring cell `h` or a neighbour.
-        let corners: Vec<(Vec3, Hex)> = std::iter::once(h)
-            .chain(h.all_neighbors())
-            .flat_map(|n| (0..6).filter_map(move |i| layout.vertex(n, i).map(|v| (v, n))))
-            .collect();
-        let chunk_of = |v: &Vec3| {
-            corners
-                .iter()
-                .find(|(c, _)| c == v)
-                .map(|&(_, n)| n.to_lower_res(r))
-                .ok_or(ChunkError::StrayVertex(h))
-        };
-        let mut tris = Vec::new();
-        let (faces, quads, _) = layout.owned_tris_into(h, false, &mut tris);
-        if faces != 0 {
-            return Err(ChunkError::BadFaces(h)); // ring cells are entangled
-        }
-        tris.into_iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let chunks = t.iter().map(chunk_of).collect::<Result<Vec<_>, _>>()?;
-                let also = chunks.into_iter().find(|&c| c != coord && c != owner);
-                Ok((owner, also, i < quads, t))
-            })
-            .collect::<Result<Vec<_>, _>>()
-    });
-    tagged
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .try_fold(
-            Vec::<SeamGroup>::new(),
-            |mut groups, (owner, also, is_quad, t)| {
-                let at = groups
-                    .iter()
-                    .position(|s| s.owner == owner && s.also == also)
-                    .unwrap_or_else(|| {
-                        groups.push(SeamGroup {
-                            owner,
-                            also,
-                            quads: Vec::new(),
-                            junctions: Vec::new(),
-                        });
-                        groups.len() - 1
-                    });
-                let g = &mut groups[at];
-                if is_quad {
-                    &mut g.quads
-                } else {
-                    &mut g.junctions
-                }
-                .push(t);
-                Ok(groups)
-            },
-        )
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -248,7 +194,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     })
 }
 
-/// Builds chunk `(q, r)` and returns its HXCK bytes; free them with `ac_free`.
+/// Builds chunk `(q, r)` with the caller's stored edits and returns its HXCK
+/// bytes; free them with `ac_free`.
 ///
 /// @param chunk_radius {u32} — rings of cells per chunk.
 /// @param hex_size {f32} — full cell size (centre to corner), in metres.
@@ -257,12 +204,16 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// @param radius_seed {u32} — cell-radius-noise seed, likewise.
 /// @param q {i32} — the chunk's coordinate on the chunk lattice.
 /// @param r {i32} — likewise.
+/// @param edits {*const AcEdit} — `n_edits` stored edits of the chunk's own
+///   cells and its entangled ring; may be null when `n_edits` is 0.
+/// @param n_edits {usize} — how many.
 /// @param out_len {*mut usize} — receives the byte count (0 on failure).
-/// @returns {*mut u8} the bytes, or null if the chunk couldn't be built
-/// (a broken layout invariant, `ChunkError`); nothing to free then.
+/// @param out_err {*mut u32} — receives an `AcError` (0 on success).
+/// @returns {*mut u8} the bytes, or null with `out_err` set; nothing to free then.
 ///
 /// # Safety
-/// `out_len` must be valid for a write.
+/// `out_len` and `out_err` must be valid for a write; `edits` must point to
+/// `n_edits` readable `AcEdit`s unless `n_edits` is 0.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)] // flat C ABI, no struct layout to keep in sync
 pub unsafe extern "C" fn ac_chunk(
@@ -273,7 +224,10 @@ pub unsafe extern "C" fn ac_chunk(
     radius_seed: u32,
     q: i32,
     r: i32,
+    edits: *const AcEdit,
+    n_edits: usize,
     out_len: *mut usize,
+    out_err: *mut u32,
 ) -> *mut u8 {
     let world = World {
         chunk_radius,
@@ -282,13 +236,28 @@ pub unsafe extern "C" fn ac_chunk(
         height_seed,
         radius_seed,
     };
-    let Ok(bytes) = chunk_bytes(world, Hex::new(q, r)) else {
-        unsafe { *out_len = 0 };
-        return std::ptr::null_mut();
+    let edits = if n_edits == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(edits, n_edits) }
     };
-    let bytes = bytes.into_boxed_slice();
-    unsafe { *out_len = bytes.len() };
-    Box::into_raw(bytes).cast()
+    match chunk_bytes(world, Hex::new(q, r), edits) {
+        Ok(bytes) => {
+            let bytes = bytes.into_boxed_slice();
+            unsafe {
+                *out_len = bytes.len();
+                *out_err = AcError::None as u32;
+            }
+            Box::into_raw(bytes).cast()
+        }
+        Err(e) => {
+            unsafe {
+                *out_len = 0;
+                *out_err = e as u32;
+            }
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Frees bytes from `ac_chunk`.
@@ -312,80 +281,76 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../src/core/testdata/chunk_0_0.bin"
     );
+    /// The Zig port of `EntangledSeam::drawn` reads this copy of apicult's table.
+    const DRAWN_TABLE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../src/core/testdata/entangled_seam_drawn.tsv"
+    );
+
+    fn u32_at(b: &[u8], i: usize) -> usize {
+        u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize
+    }
 
     #[test]
     fn header_counts_match_payload_anywhere() {
         // Near the origin, and far past the old checked-in world's edge.
         for coord in [Hex::new(-3, 2), Hex::new(400, -900)] {
-            let b = chunk_bytes(WORLD, coord).unwrap();
-            let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+            let b = chunk_bytes(WORLD, coord, &[]).unwrap();
             assert_eq!(&b[0..4], MAGIC);
-            assert_eq!(u32_at(N_CELLS_AT), 127); // 1 + 3·6·7 cells
-            assert!(u32_at(24) > 0 && u32_at(28) > 0, "every chunk has seams");
-            assert_eq!(
-                b.len(),
-                HEADER_LEN
-                    + u32_at(16) * CELL_LEN
-                    + u32_at(20) * 36
-                    + u32_at(24) * SEAM_LEN
-                    + u32_at(28) * 36
-            );
-            assert_eq!(
-                u64::from_le_bytes(b[HASH_AT..HASH_AT + 8].try_into().unwrap()),
-                fnv1a64(&b[HEADER_LEN..])
-            );
+            let [cells, tris, ring, seam_tris] = [16, 20, 24, 28].map(|i| u32_at(&b, i));
+            assert_eq!(cells, 127); // 1 + 3·6·7 cells
+            assert_eq!(tris, 14 * cells);
+            assert_eq!(ring, 6 * 7);
+            assert!(seam_tris > 0, "every chunk has seams");
+            let len = cells * CELL_LEN + tris * TRI_LEN + ring * RING_LEN;
+            assert_eq!(b.len(), HEADER_LEN + len + seam_tris * (KEY_LEN + TRI_LEN));
+            let hash = u64::from_le_bytes(b[HASH_AT..HASH_AT + 8].try_into().unwrap());
+            assert_eq!(hash, fnv1a64(&b[HEADER_LEN..]));
         }
     }
 
-    /// Our seam groups hold exactly the tris of apicult's own, per `(owner, also)`.
     #[test]
-    fn seams_match_apicult() {
-        use apicult_desigual::{ChunkSource, NoiseWorld};
-        let settings = HGridSettings {
-            nominal_hex_radius: WORLD.hex_size,
-            max_height: WORLD.max_height,
-            height_noise_seed: WORLD.height_seed,
-            radius_noise_seed: WORLD.radius_seed,
-            ..HGridSettings::default()
+    fn edits_reach_the_chunk_and_bad_ones_are_errors() {
+        let (coord, hex) = (Hex::ZERO, Hex::new(1, -1));
+        let edit = AcEdit {
+            q: hex.x,
+            r: hex.y,
+            channel: AC_HEIGHT,
+            value: 2.5,
         };
-        let source = NoiseWorld {
-            settings: settings.clone(),
-            chunk_radius: WORLD.chunk_radius,
-        };
-        let bits = |ts: &[[Vec3; 3]]| {
-            let mut v: Vec<[u32; 9]> = ts
-                .iter()
-                .map(|t| std::array::from_fn(|i| t[i / 3].to_array()[i % 3].to_bits()))
-                .collect();
-            v.sort();
-            v
-        };
-        for coord in [Hex::ZERO, Hex::new(-3, 2), Hex::new(7, -1)] {
-            let layout = HGridLayout::for_chunk(&settings, coord, WORLD.chunk_radius);
-            let ours = seams(&layout, coord, WORLD.chunk_radius).unwrap();
-            let theirs = source.chunk(coord).seams;
-            assert_eq!(ours.len(), theirs.len());
-            for (o, t) in ours.iter().zip(&theirs) {
-                assert_eq!(
-                    (o.owner, o.also),
-                    (t.owner, t.also),
-                    "same groups, same order"
-                );
-                assert_eq!(
-                    bits(&[o.quads.clone(), o.junctions.clone()].concat()),
-                    bits(&t.tris)
-                );
-                // Quads come whole, and only between two chunks.
-                assert!(o.quads.len() % 2 == 0 && (o.quads.is_empty() || o.also.is_none()));
-            }
-        }
+        let b = chunk_bytes(WORLD, coord, &[edit]).unwrap();
+        let cells = &b[HEADER_LEN..HEADER_LEN + 127 * CELL_LEN];
+        let found = cells.chunks(CELL_LEN).any(|c| {
+            c[0..8] == [hex.x.to_le_bytes(), hex.y.to_le_bytes()].concat()
+                && f32::from_le_bytes(c[8..12].try_into().unwrap()) == 2.5
+        });
+        assert!(found, "the edited height is in the cells");
+        assert_ne!(b, chunk_bytes(WORLD, coord, &[]).unwrap());
+        let bad = |e: AcEdit| chunk_bytes(WORLD, coord, &[e]).err();
+        assert_eq!(
+            bad(AcEdit { channel: 7, ..edit }),
+            Some(AcError::BadChannel)
+        );
+        assert_eq!(
+            bad(AcEdit {
+                value: f32::NAN,
+                ..edit
+            }),
+            Some(AcError::NonFiniteEdit)
+        );
+        assert_eq!(
+            bad(AcEdit { q: 50, ..edit }),
+            Some(AcError::EditOutsideChunk)
+        );
+        let far = chunk_bytes(WORLD, Hex::new(i32::MAX, 0), &[]).err();
+        assert_eq!(far, Some(AcError::TooFarFromOrigin));
     }
 
     /// Fails when apicult or `WORLD` changes the output; then
-    /// `UPDATE_FIXTURE=1 cargo test` rewrites the fixture.
+    /// `UPDATE_FIXTURE=1 cargo test` rewrites the fixture (and the table copy).
     #[test]
     fn fixture_is_current() {
-        let bytes = chunk_bytes(WORLD, Hex::ZERO).unwrap();
+        let bytes = chunk_bytes(WORLD, Hex::ZERO, &[]).unwrap();
         if std::env::var_os("UPDATE_FIXTURE").is_some() {
             std::fs::write(FIXTURE, &bytes).unwrap();
         }
@@ -396,31 +361,84 @@ mod tests {
     }
 
     #[test]
+    fn drawn_table_is_current() {
+        let table = apicult_desigual::ENTANGLED_SEAM_DRAWN_TABLE;
+        if std::env::var_os("UPDATE_FIXTURE").is_some() {
+            std::fs::write(DRAWN_TABLE, table).unwrap();
+        }
+        assert!(
+            std::fs::read_to_string(DRAWN_TABLE).unwrap() == table,
+            "seam draw table copy is stale: UPDATE_FIXTURE=1 cargo test"
+        );
+    }
+
+    #[test]
     fn ac_chunk_round_trip() {
-        let mut len = 0;
+        let (mut len, mut err) = (0, 99);
         let w = WORLD;
+        let c = Hex::new(2, -1).to_higher_res(w.chunk_radius); // the chunk's centre cell
+        let edit = AcEdit {
+            q: c.x,
+            r: c.y,
+            channel: AC_SIZE,
+            value: 1.0,
+        };
+        let (rs, hs, mh) = (w.radius_seed, w.height_seed, w.max_height);
         let ptr = unsafe {
             ac_chunk(
                 w.chunk_radius,
                 w.hex_size,
-                w.max_height,
-                w.height_seed,
-                w.radius_seed,
+                mh,
+                hs,
+                rs,
                 2,
                 -1,
+                &edit,
+                1,
                 &mut len,
+                &mut err,
             )
         };
-        assert!(!ptr.is_null());
+        assert!(!ptr.is_null() && err == 0);
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
         unsafe { ac_free(ptr, len) };
-        assert_eq!(bytes, chunk_bytes(WORLD, Hex::new(2, -1)).unwrap());
-    }
+        assert_eq!(bytes, chunk_bytes(WORLD, Hex::new(2, -1), &[edit]).unwrap());
 
-    #[test]
-    fn counts_that_overflow_are_errors() {
-        assert_eq!(fit::<u8>(255, "x"), Ok(255));
-        assert_eq!(fit::<u8>(256, "x"), Err(ChunkError::TooMany("x")));
+        let bad = AcEdit { channel: 9, ..edit };
+        let ptr = unsafe {
+            ac_chunk(
+                w.chunk_radius,
+                w.hex_size,
+                mh,
+                hs,
+                rs,
+                2,
+                -1,
+                &bad,
+                1,
+                &mut len,
+                &mut err,
+            )
+        };
+        assert!(ptr.is_null() && len == 0 && err == AcError::BadChannel as u32);
+        let none = std::ptr::null();
+        let ptr = unsafe {
+            ac_chunk(
+                w.chunk_radius,
+                w.hex_size,
+                mh,
+                hs,
+                rs,
+                0,
+                0,
+                none,
+                0,
+                &mut len,
+                &mut err,
+            )
+        };
+        assert!(!ptr.is_null() && err == 0);
+        unsafe { ac_free(ptr, len) };
     }
 
     #[test]

@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# C ABI over apicult-desigual's chunk generator, linked into zig-fatmile
+# C ABI over apicult-desigual's chunk functions, linked into zig-fatmile
 # (native and wasm32-emscripten). Built by build.zig; see src/lib.rs.
 [lib]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-apicult-desigual = { git = "https://github.com/dynnamitt/apicult-desigual-rs", rev = "fcdef8c1ad1ef411d54eaa3ff3071850c58fc73a" }
+apicult-desigual = { git = "https://github.com/dynnamitt/apicult-desigual-rs", rev = "a13d432d1f7dfedda53cf9674ea382af5c9bb7fd" }
 glam = "0.30"
 hexx = "0.24"
 

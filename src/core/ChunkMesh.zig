@@ -57,34 +57,40 @@ pub fn bounds(m: ChunkMesh) Aabb {
 /// @returns {ChunkMesh} every tri of `chunk.tris`; free with `deinit`.
 pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{OutOfMemory}!ChunkMesh {
     var w: Writer = try .init(allocator, chunk.tris.len, style);
-    for (chunk.cells) |cell| w.run(chunk.cellTris(cell), Chunk.face_tris, 2 * @as(usize, cell.n_quads));
+    for (0..chunk.cells.len) |i| w.run(chunk.cellTris(i), Chunk.face_tris, Chunk.quad_tris);
     std.debug.assert(w.n == chunk.tris.len);
     return w.mesh;
 }
 
-/// One mesh of the seams in `mask`, back to back: gap quads and junctions
-/// only, no faces. Rebuild it when the mask changes (a neighbour loads or
-/// unloads), rather than keeping a mesh per seam.
-/// @param chunk {Chunk} the carrier, whose seams these are.
-/// @param mask {Chunk.SeamMask} bit `i` takes `chunk.seams[i]`, e.g. from `Chunk.drawnSeams`.
+/// One mesh of the seam tris whose key is in `mask`, back to back: gap
+/// quads and junctions only, no faces. Rebuild it when the mask changes (a
+/// neighbour loads or unloads), rather than keeping a mesh per group.
+/// @param chunk {Chunk} the carrier, whose seam tris these are.
+/// @param mask {Chunk.SeamMask} bit `i` takes the tris keyed `chunk.groups()[i]`,
+///   e.g. from `Chunk.drawnSeams`.
 /// @param style {Style} colours and light.
-/// @returns {ChunkMesh} the seams' tris, none if `mask` is 0; free with `deinit`.
-pub fn buildSeams(allocator: std.mem.Allocator, chunk: Chunk, mask: Chunk.SeamMask, style: Style) error{OutOfMemory}!ChunkMesh {
+/// @returns {ChunkMesh} those tris, none if `mask` is 0; free with `deinit`.
+pub fn buildSeams(allocator: std.mem.Allocator, chunk: *const Chunk, mask: Chunk.SeamMask, style: Style) error{OutOfMemory}!ChunkMesh {
     var n: usize = 0;
-    var it = chunk.seamIterator();
-    while (it.next()) |item| {
-        if (inMask(mask, item.index)) n += item.tris.len;
+    for (chunk.seam_keys) |k| {
+        if (inMask(chunk, mask, k)) n += 1;
     }
     var w: Writer = try .init(allocator, n, style);
-    it = chunk.seamIterator();
+    var it = chunk.ringIterator();
     while (it.next()) |item| {
-        if (inMask(mask, item.index)) w.run(item.tris, 0, item.seam.n_quad_tris);
+        // A ring cell's quads share one key, so pairs stay whole.
+        const nq = item.cell.n_quad_tris;
+        if (nq > 0 and inMask(chunk, mask, item.keys[0])) w.run(item.tris[0..nq], 0, nq);
+        for (item.tris[nq..], item.keys[nq..], nq..) |_, k, j| {
+            if (inMask(chunk, mask, k)) w.run(item.tris[j..][0..1], 0, 0);
+        }
     }
     std.debug.assert(w.n == n);
     return w.mesh;
 }
 
-fn inMask(mask: Chunk.SeamMask, i: usize) bool {
+fn inMask(chunk: *const Chunk, mask: Chunk.SeamMask, key: Chunk.SeamKey) bool {
+    const i = chunk.groupOf(key) orelse return false;
     return mask & (@as(Chunk.SeamMask, 1) << @intCast(i)) != 0;
 }
 
@@ -202,7 +208,7 @@ test "faces are flat-shaded at their cell's height colour" {
     // A flat face: normal straight up, fully lit by the sun's vertical part.
     const up_light = style.ambient + (1 - style.ambient) * style.sun.normalize().y;
     const want = palette.shade(palette.ground(cell.height / style.max_height), up_light);
-    const i = cell.first_tri * 3;
+    const i = 0; // cell 0's first vertex
     try testing.expectEqual(want, std.mem.readInt(u32, m.colors[i * 4 ..][0..4], .big));
 }
 
@@ -211,11 +217,11 @@ test "rims: lines only in gap quads, each vertex on one of the quad's rims" {
     const m = try build(testing.allocator, chunk, .{});
     defer m.deinit(testing.allocator);
     var quads: usize = 0;
-    for (chunk.cells) |cell| {
-        const v = cell.first_tri * 3; // the cell's first vertex
+    for (chunk.cells, 0..) |cell, c| {
+        const v = c * Chunk.tri_sequence * 3; // the cell's first vertex
         // Faces stay clean.
         for (m.rims[v * 2 ..][0 .. Chunk.face_tris * 6]) |r| try testing.expectEqual(no_rim, r);
-        for (0..2 * @as(usize, cell.n_quads)) |q| {
+        for (0..Chunk.quad_tris) |q| {
             const qv = v + (Chunk.face_tris + q) * 3;
             for (0..3) |k| {
                 const r = m.rims[(qv + k) * 2 ..][0..2];
@@ -229,39 +235,47 @@ test "rims: lines only in gap quads, each vertex on one of the quad's rims" {
             quads += 1;
         }
         // The owning cell's rim is one of its sides: as long as its radius.
-        const pair = chunk.cellTris(cell)[Chunk.face_tris..][0..2].*;
-        if (cell.n_quads > 0) try testing.expectApproxEqAbs(cell.radius, quadEdges(pair)[0][1].sub(quadEdges(pair)[0][0]).length(), 1e-4);
+        const pair = chunk.cellTris(c)[Chunk.face_tris..][0..2].*;
+        try testing.expectApproxEqAbs(cell.radius, quadEdges(pair)[0][1].sub(quadEdges(pair)[0][0]).length(), 1e-4);
     }
     try testing.expect(quads > 0);
-    const j = chunk.cells[0];
-    if (j.n_junctions > 0) try testing.expectEqual(no_rim, m.rims[(j.first_tri + j.triCount() - 1) * 3 * 2]);
+    // Cell 0's last tri is a junction: no lines.
+    try testing.expectEqual(no_rim, m.rims[(Chunk.tri_sequence - 1) * 3 * 2]);
 }
 
-test "seam mesh: the masked seams' tris, lines in their quads, none in their junctions" {
+test "seam mesh: each group's tris, lines in their quads, none in their junctions" {
     const chunk = try Chunk.parse(test_data.chunk_bytes);
-    var quad_tris: usize = 0;
-    var it = chunk.seamIterator();
-    while (it.next()) |item| {
-        const s = item.seam;
-        const m = try buildSeams(testing.allocator, chunk, @as(Chunk.SeamMask, 1) << @intCast(item.index), .{});
+    var total: usize = 0;
+    for (chunk.groups(), 0..) |key, g| {
+        const m = try buildSeams(testing.allocator, &chunk, @as(Chunk.SeamMask, 1) << @intCast(g), .{});
         defer m.deinit(testing.allocator);
-        try testing.expectEqual(3 * s.triCount(), m.vertexCount());
+        var want: usize = 0;
+        for (chunk.seam_keys) |k| want += @intFromBool(k.eql(key));
+        try testing.expectEqual(3 * want, m.vertexCount());
+        total += want;
         for (0..m.vertexCount()) |v| {
             const r = m.rims[v * 2 ..][0..2];
-            if (v < 3 * @as(usize, s.n_quad_tris)) {
-                try testing.expectApproxEqAbs(0, @min(r[0], r[1]), 1e-4);
-            } else {
-                try testing.expectEqual(no_rim, r[0]);
-            }
+            // A corner group holds only junctions; quads have lines on a rim.
+            if (key.also() != null) try testing.expectEqual(no_rim, r[0]);
         }
-        quad_tris += s.n_quad_tris;
     }
-    try testing.expect(quad_tris > 0);
+    try testing.expectEqual(chunk.seam_tris.len, total);
 
-    const all = try buildSeams(testing.allocator, chunk, ~@as(Chunk.SeamMask, 0), .{});
+    const all = try buildSeams(testing.allocator, &chunk, ~@as(Chunk.SeamMask, 0), .{});
     defer all.deinit(testing.allocator);
     try testing.expectEqual(3 * chunk.seam_tris.len, all.vertexCount());
-    const none = try buildSeams(testing.allocator, chunk, 0, .{});
+    var quad_verts: usize = 0;
+    for (0..all.vertexCount()) |v| {
+        const r = all.rims[v * 2 ..][0..2];
+        if (r[0] != no_rim) {
+            try testing.expectApproxEqAbs(0, @min(r[0], r[1]), 1e-4);
+            quad_verts += 1;
+        }
+    }
+    var quad_tris: usize = 0;
+    for (chunk.ring) |c| quad_tris += c.n_quad_tris;
+    try testing.expectEqual(3 * quad_tris, quad_verts);
+    const none = try buildSeams(testing.allocator, &chunk, 0, .{});
     defer none.deinit(testing.allocator);
     try testing.expectEqual(0, none.vertexCount());
     try testing.expect(none.bounds().isEmpty());
