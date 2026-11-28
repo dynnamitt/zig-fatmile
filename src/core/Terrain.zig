@@ -76,6 +76,13 @@ fn cellTris(t: *const Terrain, h: Hex) ?[]align(1) const Chunk.Tri {
     return loaded.chunk.cellTris(i);
 }
 
+/// A loaded cell's height (its face's), or null if its chunk isn't loaded.
+pub fn cellHeight(t: *const Terrain, h: Hex) ?f32 {
+    const loaded = t.chunks.getPtr(h.toLowerRes(t.chunk_radius)) orelse return null;
+    const i = loaded.cells.get(h) orelse return null;
+    return loaded.chunk.cells[i].height;
+}
+
 /// Cell whose flat top (its face, not a gap or junction) covers a world
 /// point. Its height is that cell's `height`.
 /// @param x {f32} world x, m.
@@ -217,6 +224,16 @@ test "nothing outside the loaded chunks; remove unloads" {
     try testing.expect(!t.chunks.contains(.zero));
     try testing.expectEqual(null, t.heightAt(0, 0));
     t.remove(.zero); // removing twice is fine
+}
+
+test "cellHeight: a loaded cell's face height; null off the terrain" {
+    var t = try testTerrain();
+    defer t.deinit();
+    const chunk = t.chunks.get(.zero).?.chunk;
+    const cell = chunk.cells[5];
+    try std.testing.expectEqual(cell.height, t.cellHeight(cell.hex()).?);
+    try std.testing.expectEqual(cell.height, chunk.cellTris(5)[0].a.y);
+    try std.testing.expectEqual(null, t.cellHeight(.{ .q = 500, .r = 0 }));
 }
 
 test "faceAt: a face's own cell; null over a gap or off the terrain" {

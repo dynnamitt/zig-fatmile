@@ -12,6 +12,7 @@ pub const Hex = @import("Hex.zig");
 pub const Chunk = @import("Chunk.zig");
 pub const world = @import("world.zig");
 pub const Terrain = @import("Terrain.zig");
+pub const Edits = @import("Edits.zig");
 pub const ChunkMesh = @import("ChunkMesh.zig");
 pub const ground = @import("ground.zig");
 pub const streaming = @import("streaming.zig");

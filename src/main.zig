@@ -109,6 +109,10 @@ fn frame() callconv(.c) void {
     view.eye.y += lift;
     const cam = scene.camera(view);
     const cell = cellUnderPointer(cam);
+    // Between steps, like `update`: the dig rebuilds terrain the systems read.
+    if (cell) |c| if (rl.isMouseButtonPressed(.right) or rl.isKeyPressed(.f)) {
+        stream.dig(c) catch std.log.err("out of memory: couldn't dig cell {d},{d}", .{ c.q, c.r });
+    };
     const draws = scene.draw(cam, sky, stream.pieces.items, stream.material);
 
     // CPU work = ECS steps + chunk loads + issuing draw calls, up to here.

@@ -108,6 +108,13 @@ pub fn toLowerRes(h: Hex, radius: u32) Hex {
     return .{ .q = floorDiv(1 + lx - ly, 3.0), .r = floorDiv(1 + ly - lz, 3.0) };
 }
 
+/// The centre cell of chunk `h` in a grid of chunks of `radius` (hexx
+/// `to_higher_res`): the inverse of `toLowerRes` for chunk centres.
+pub fn toHigherRes(h: Hex, radius: u32) Hex {
+    const range: i32 = @intCast(radius);
+    return .{ .q = h.q * (range + 1) + range * (h.q + h.r), .r = h.r * (range + 1) - range * h.q };
+}
+
 fn floorDiv(n: i32, d: f32) i32 {
     const nf: f32 = @floatFromInt(n);
     return @intFromFloat(@floor(nf / d));
@@ -175,6 +182,14 @@ test "toLowerRes: the chunk round the origin holds exactly its radius' hexes" {
         const inside = i < rangeCount(2);
         try testing.expectEqual(inside, zero.eql(h.toLowerRes(2)));
     }
+}
+
+test "toHigherRes: each chunk's centre maps back to it" {
+    for ([_]Hex{ .zero, .{ .q = 1, .r = 0 }, .{ .q = -3, .r = 2 }, .{ .q = 40, .r = -17 } }) |c| {
+        for ([_]u32{ 0, 1, 6 }) |r| try testing.expectEqual(c, c.toHigherRes(r).toLowerRes(r));
+    }
+    // A chunk of radius 6 is 13 cells across: its east neighbour's centre is 13 away.
+    try testing.expectEqual(13, distance(Hex.zero.toHigherRes(6), (Hex{ .q = 1, .r = 0 }).toHigherRes(6)));
 }
 
 test "spiral is nearest first, unique and complete" {
