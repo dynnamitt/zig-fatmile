@@ -30,17 +30,19 @@ const Loaded = struct {
     seam_bounds: core.Aabb = .empty,
 };
 
-/// One stored edit for `ac_chunk`: the final value of one channel of a cell.
-pub const AcEdit = extern struct { q: i32, r: i32, channel: u32, value: f32 };
 /// apicult-ffi (`apicult-ffi/src/lib.rs`): HXCK bytes of chunk `q`, `r` with
 /// `n_edits` stored edits of its own cells and entangled ring, freed with
 /// `ac_free`; null (`out_len` 0, `out_err` an `AcError` code) if apicult
 /// can't build it.
-extern fn ac_chunk(chunk_radius: u32, hex_size: f32, max_height: f32, height_seed: u32, radius_seed: u32, q: i32, r: i32, edits: ?[*]const AcEdit, n_edits: usize, out_len: *usize, out_err: *u32) ?[*]u8;
+extern fn ac_chunk(chunk_radius: u32, hex_size: f32, max_height: f32, height_seed: u32, radius_seed: u32, q: i32, r: i32, edits: ?[*]const core.Edits.Edit, n_edits: usize, out_len: *usize, out_err: *u32) ?[*]u8;
 extern fn ac_free(ptr: [*]u8, len: usize) void;
 
 gpa: std.mem.Allocator,
 terrain: core.Terrain,
+/// The dug cells: every chunk is built from noise plus its edits.
+edits: core.Edits,
+/// Scratch for one chunk's edits, reused by every `load`.
+edit_buf: std.ArrayListUnmanaged(core.Edits.Edit) = .empty,
 loaded: std.MultiArrayList(Loaded) = .empty,
 /// Chunks that failed to load, so they aren't retried every frame.
 broken: std.ArrayList(core.Hex) = .empty,
@@ -58,6 +60,7 @@ pub fn init(gpa: std.mem.Allocator) !TerrainStream {
     return .{
         .gpa = gpa,
         .terrain = .init(gpa, core.world.chunk_radius, core.world.hex_size),
+        .edits = .init(gpa, core.world.chunk_radius),
         .material = try terrain_render.loadMaterial(),
     };
 }
@@ -68,6 +71,8 @@ pub fn deinit(s: *TerrainStream) void {
     s.broken.deinit(s.gpa);
     s.pieces.deinit(s.gpa);
     s.terrain.deinit();
+    s.edits.deinit();
+    s.edit_buf.deinit(s.gpa);
     rl.unloadMaterial(s.material);
 }
 
@@ -81,10 +86,7 @@ pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
     for (plan.unload) |c| {
         s.unload(core.Hex.indexOf(s.loaded.items(.coord), c).?);
     }
-    for (plan.load) |c| s.load(c) catch |err| {
-        std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
-        s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
-    };
+    for (plan.load) |c| s.loadOrMarkBroken(c);
     if (!s.stale) return;
     if (s.refresh()) {
         s.refresh_failure_logged = false;
@@ -140,11 +142,22 @@ const World = struct {
     }
 };
 
+/// Loads `coord`, or logs why not and lists it in `broken`.
+fn loadOrMarkBroken(s: *TerrainStream, coord: core.Hex) void {
+    s.load(coord) catch |err| {
+        std.log.err("terrain chunk {d},{d}: {t}", .{ coord.q, coord.r, err });
+        s.broken.append(s.gpa, coord) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ coord.q, coord.r });
+    };
+}
+
 fn load(s: *TerrainStream, coord: core.Hex) !void {
     const w = core.world;
+    s.edit_buf.clearRetainingCapacity();
+    try s.edits.forChunk(coord, &s.edit_buf, s.gpa);
     var len: usize = 0;
     var err: u32 = 0;
-    const ptr = ac_chunk(w.chunk_radius, w.hex_size, w.max_height, w.height_seed, w.radius_seed, coord.q, coord.r, null, 0, &len, &err) orelse {
+    const edits = s.edit_buf.items;
+    const ptr = ac_chunk(w.chunk_radius, w.hex_size, w.max_height, w.height_seed, w.radius_seed, coord.q, coord.r, edits.ptr, edits.len, &len, &err) orelse {
         std.log.err("apicult can't build chunk {d},{d}: error {d} (apicult-ffi's AcError)", .{ coord.q, coord.r, err });
         return error.GeneratorFailed;
     };
@@ -160,6 +173,26 @@ fn load(s: *TerrainStream, coord: core.Hex) !void {
     // Its seam mesh comes from the next `refresh`.
     s.loaded.appendAssumeCapacity(.{ .coord = coord, .bytes = bytes, .chunk = chunk, .mesh = terrain_render.upload(cpu), .bounds = cpu.bounds() });
     s.stale = true;
+}
+
+/// Digs `cell`: stores it `core.Edits.dig_depth` lower (down to
+/// `core.Edits.min_height`) and rebuilds every loaded chunk whose layout
+/// holds it, 1 to 3 (apicult's consumer rule 3), each from noise plus its
+/// edits. The draw list is refreshed before returning, so the next draw is
+/// current. Call it between ECS steps, never during one (systems read the
+/// terrain).
+/// @param cell {core.Hex} a loaded cell; any other is ignored.
+pub fn dig(s: *TerrainStream, cell: core.Hex) error{OutOfMemory}!void {
+    const current = s.terrain.cellHeight(cell) orelse return;
+    try s.edits.set(cell, core.Edits.height, core.Edits.dug(current));
+    var buf: [3]core.Hex = undefined;
+    for (core.Edits.chunksHolding(cell, core.world.chunk_radius, &buf)) |c| {
+        const i = core.Hex.indexOf(s.loaded.items(.coord), c) orelse continue;
+        s.unload(i);
+        s.loadOrMarkBroken(c);
+    }
+    // On failure `pieces` is left empty and `stale` set: the next `update` retries.
+    s.refresh() catch std.log.err("out of memory: terrain draw list is behind after a dig", .{});
 }
 
 /// Frees chunk `i`. `pieces` still names its meshes until the next `refresh`.
