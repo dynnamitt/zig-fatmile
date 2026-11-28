@@ -10,7 +10,7 @@ publish = false
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-apicult-desigual = { git = "https://github.com/dynnamitt/apicult-desigual-rs", rev = "a13d432d1f7dfedda53cf9674ea382af5c9bb7fd" }
+apicult-desigual = { git = "https://github.com/dynnamitt/apicult-desigual-rs", rev = "5b3e0a104cc53bd57f37518bf764f1cb940fcc2c" }
 glam = "0.30"
 hexx = "0.24"
 
