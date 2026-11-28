@@ -86,10 +86,7 @@ pub fn update(s: *TerrainStream, x: f32, z: f32, budget: usize) void {
     for (plan.unload) |c| {
         s.unload(core.Hex.indexOf(s.loaded.items(.coord), c).?);
     }
-    for (plan.load) |c| s.load(c) catch |err| {
-        std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
-        s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
-    };
+    for (plan.load) |c| s.loadOrMarkBroken(c);
     if (!s.stale) return;
     if (s.refresh()) {
         s.refresh_failure_logged = false;
@@ -145,6 +142,14 @@ const World = struct {
     }
 };
 
+/// Loads `coord`, or logs why not and lists it in `broken`.
+fn loadOrMarkBroken(s: *TerrainStream, coord: core.Hex) void {
+    s.load(coord) catch |err| {
+        std.log.err("terrain chunk {d},{d}: {t}", .{ coord.q, coord.r, err });
+        s.broken.append(s.gpa, coord) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ coord.q, coord.r });
+    };
+}
+
 fn load(s: *TerrainStream, coord: core.Hex) !void {
     const w = core.world;
     s.edit_buf.clearRetainingCapacity();
@@ -184,10 +189,7 @@ pub fn dig(s: *TerrainStream, cell: core.Hex) error{OutOfMemory}!void {
     for (core.Edits.chunksHolding(cell, core.world.chunk_radius, &buf)) |c| {
         const i = core.Hex.indexOf(s.loaded.items(.coord), c) orelse continue;
         s.unload(i);
-        s.load(c) catch |err| {
-            std.log.err("terrain chunk {d},{d}: {t}", .{ c.q, c.r, err });
-            s.broken.append(s.gpa, c) catch std.log.err("out of memory: chunk {d},{d} will be retried", .{ c.q, c.r });
-        };
+        s.loadOrMarkBroken(c);
     }
     // On failure `pieces` is left empty and `stale` set: the next `update` retries.
     s.refresh() catch std.log.err("out of memory: terrain draw list is behind after a dig", .{});
