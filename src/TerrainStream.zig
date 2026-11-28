@@ -32,6 +32,9 @@ const Loaded = struct {
 
 /// One stored edit for `ac_chunk`: the final value of one channel of a cell.
 pub const AcEdit = extern struct { q: i32, r: i32, channel: u32, value: f32 };
+/// `AcEdit.channel` values (apicult-ffi's `AC_HEIGHT`, `AC_SIZE`).
+pub const ac_height: u32 = 0;
+pub const ac_size: u32 = 1;
 /// apicult-ffi (`apicult-ffi/src/lib.rs`): HXCK bytes of chunk `q`, `r` with
 /// `n_edits` stored edits of its own cells and entangled ring, freed with
 /// `ac_free`; null (`out_len` 0, `out_err` an `AcError` code) if apicult

@@ -125,6 +125,8 @@ comptime {
 }
 
 coord: Hex,
+// align(1): the bytes come from apicult-ffi's `Box<[u8]>` or @embedFile, with
+// no alignment promise. Every target we build for reads unaligned f32s.
 cells: []align(1) const Cell,
 tris: []align(1) const Tri,
 ring: []align(1) const RingCell,
@@ -425,6 +427,9 @@ test "rejects tris that aren't a tri_sequence per cell" {
     std.mem.writeInt(u32, copy[16..20], 127 - 9, .little);
     std.mem.writeInt(u32, copy[20..24], 14 * 127 + 4, .little);
     try testing.expectError(error.BadCellRun, parse(&copy));
+}
+
+test "rejects a ring cell with an odd quad tri count" {
     var ring_bad = test_data.chunk_bytes.*;
     const chunk = try parse(&ring_bad);
     const ring_at = @intFromPtr(chunk.ring.ptr) - @intFromPtr(&ring_bad);

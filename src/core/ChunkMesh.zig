@@ -65,7 +65,7 @@ pub fn build(allocator: std.mem.Allocator, chunk: Chunk, style: Style) error{Out
 /// One mesh of the seam tris whose key is in `mask`, back to back: gap
 /// quads and junctions only, no faces. Rebuild it when the mask changes (a
 /// neighbour loads or unloads), rather than keeping a mesh per group.
-/// @param chunk {Chunk} the carrier, whose seam tris these are.
+/// @param chunk {*const Chunk} the carrier, whose seam tris these are.
 /// @param mask {Chunk.SeamMask} bit `i` takes the tris keyed `chunk.groups()[i]`,
 ///   e.g. from `Chunk.drawnSeams`.
 /// @param style {Style} colours and light.
