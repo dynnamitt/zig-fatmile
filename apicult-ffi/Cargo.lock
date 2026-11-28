@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "apicult-desigual"
-version = "0.3.0"
-source = "git+https://github.com/dynnamitt/apicult-desigual-rs?rev=fcdef8c1ad1ef411d54eaa3ff3071850c58fc73a#fcdef8c1ad1ef411d54eaa3ff3071850c58fc73a"
+version = "0.4.0"
+source = "git+https://github.com/dynnamitt/apicult-desigual-rs?rev=5b3e0a104cc53bd57f37518bf764f1cb940fcc2c#5b3e0a104cc53bd57f37518bf764f1cb940fcc2c"
 dependencies = [
  "glam",
  "hexx",

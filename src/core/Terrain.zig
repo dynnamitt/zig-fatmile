@@ -73,7 +73,7 @@ pub fn heightAt(t: *const Terrain, x: f32, z: f32) ?f32 {
 fn cellTris(t: *const Terrain, h: Hex) ?[]align(1) const Chunk.Tri {
     const loaded = t.chunks.getPtr(h.toLowerRes(t.chunk_radius)) orelse return null;
     const i = loaded.cells.get(h) orelse return null;
-    return loaded.chunk.cellTris(loaded.chunk.cells[i]);
+    return loaded.chunk.cellTris(i);
 }
 
 /// Cell whose flat top (its face, not a gap or junction) covers a world

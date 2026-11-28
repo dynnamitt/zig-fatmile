@@ -1,7 +1,7 @@
 //! Loads and frees terrain chunks around the player, as `core.streaming`
 //! plans: generates each with apicult-ffi's `ac_chunk` (Rust, linked into
 //! both the native and the web build), parses it into `terrain`, uploads its
-//! own mesh, and keeps per chunk one mesh of the seams `core.Chunk.Seam.drawn`
+//! own mesh, and keeps per chunk one mesh of the seam tris `core.Chunk.SeamKey.drawn`
 //! allows, which fill the gaps towards chunks that aren't loaded. The seam
 //! meshes and the draw list (`pieces`) are rebuilt only when a chunk loads or
 //! unloads. The world has no edge within any walkable distance
@@ -23,16 +23,23 @@ const Loaded = struct {
     mesh: rl.Mesh,
     /// Round `mesh`.
     bounds: core.Aabb,
-    /// The seams in `seam_mesh`.
+    /// The seam groups in `seam_mesh`.
     seam_mask: core.Chunk.SeamMask = 0,
     /// One mesh of the seams in `seam_mask`; null while that is 0.
     seam_mesh: ?rl.Mesh = null,
     seam_bounds: core.Aabb = .empty,
 };
 
-/// apicult-ffi (`apicult-ffi/src/lib.rs`): HXCK bytes of chunk `q`, `r`, freed
-/// with `ac_free`; null (and `out_len` 0) if the generator failed.
-extern fn ac_chunk(chunk_radius: u32, hex_size: f32, max_height: f32, height_seed: u32, radius_seed: u32, q: i32, r: i32, out_len: *usize) ?[*]u8;
+/// One stored edit for `ac_chunk`: the final value of one channel of a cell.
+pub const AcEdit = extern struct { q: i32, r: i32, channel: u32, value: f32 };
+/// `AcEdit.channel` values (apicult-ffi's `AC_HEIGHT`, `AC_SIZE`).
+pub const ac_height: u32 = 0;
+pub const ac_size: u32 = 1;
+/// apicult-ffi (`apicult-ffi/src/lib.rs`): HXCK bytes of chunk `q`, `r` with
+/// `n_edits` stored edits of its own cells and entangled ring, freed with
+/// `ac_free`; null (`out_len` 0, `out_err` an `AcError` code) if apicult
+/// can't build it.
+extern fn ac_chunk(chunk_radius: u32, hex_size: f32, max_height: f32, height_seed: u32, radius_seed: u32, q: i32, r: i32, edits: ?[*]const AcEdit, n_edits: usize, out_len: *usize, out_err: *u32) ?[*]u8;
 extern fn ac_free(ptr: [*]u8, len: usize) void;
 
 gpa: std.mem.Allocator,
@@ -109,7 +116,7 @@ fn refresh(s: *TerrainStream) error{OutOfMemory}!void {
         mesh.* = null;
         bounds.* = .empty;
         if (want == 0) continue;
-        const cpu = core.ChunkMesh.buildSeams(s.gpa, chunk, want, .{}) catch {
+        const cpu = core.ChunkMesh.buildSeams(s.gpa, &chunk, want, .{}) catch {
             complete = false;
             continue;
         };
@@ -139,7 +146,11 @@ const World = struct {
 fn load(s: *TerrainStream, coord: core.Hex) !void {
     const w = core.world;
     var len: usize = 0;
-    const ptr = ac_chunk(w.chunk_radius, w.hex_size, w.max_height, w.height_seed, w.radius_seed, coord.q, coord.r, &len) orelse return error.GeneratorFailed;
+    var err: u32 = 0;
+    const ptr = ac_chunk(w.chunk_radius, w.hex_size, w.max_height, w.height_seed, w.radius_seed, coord.q, coord.r, null, 0, &len, &err) orelse {
+        std.log.err("apicult can't build chunk {d},{d}: error {d} (apicult-ffi's AcError)", .{ coord.q, coord.r, err });
+        return error.GeneratorFailed;
+    };
     const bytes = ptr[0..len];
     errdefer ac_free(bytes.ptr, bytes.len);
     const chunk = try core.Chunk.parse(bytes);
