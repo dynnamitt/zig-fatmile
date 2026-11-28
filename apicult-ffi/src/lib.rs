@@ -102,6 +102,9 @@ pub enum AcError {
     BadChannel = 4,
     /// A count doesn't fit its field in the format.
     TooMany = 5,
+    /// apicult's seam keys and seam tris (or ring counts) don't line up, so
+    /// the header couldn't describe the buffer.
+    SeamCountMismatch = 6,
 }
 
 impl From<ChunkError> for AcError {
@@ -156,6 +159,12 @@ pub fn chunk_bytes(world: World, coord: Hex, edits: &[AcEdit]) -> Result<Vec<u8>
     let ring = layout.entangled_seam_counts();
     let keys = entangled_seam_keys(coord, r)?;
     let seam_tris = layout.entangled_seam_tris();
+    // One key per seam tri, and the ring counts tile them: the header's
+    // `n_seam_tris` covers both parts.
+    let ring_total: usize = ring.iter().map(|&(q, j)| q + j).sum();
+    if keys.len() != seam_tris.len() || ring_total != seam_tris.len() {
+        return Err(AcError::SeamCountMismatch);
+    }
 
     let counts = [cells.len(), tris.len(), ring.len(), seam_tris.len()];
     let mut out: Vec<u8> = [MAGIC.as_slice(), &VERSION.to_le_bytes()].concat();
@@ -417,6 +426,12 @@ mod tests {
         let (ptr, len, err) = call(Hex::ZERO, std::ptr::null(), 0);
         assert!(!ptr.is_null() && err == 0);
         unsafe { ac_free(ptr, len) };
+    }
+
+    #[test]
+    fn counts_that_overflow_are_errors() {
+        assert_eq!(fit::<u16>(65535), Ok(65535));
+        assert_eq!(fit::<u16>(65536), Err(AcError::TooMany));
     }
 
     #[test]
